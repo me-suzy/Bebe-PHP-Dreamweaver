@@ -98,6 +98,427 @@ function align_saved_html_charset_declaration_utf8($html)
     return ($out2 !== null && $cnt2 > 0) ? $out2 : $html;
 }
 
+function html_save_is_catastrophically_truncated($existing, $candidate, &$reason)
+{
+    $oldLen = strlen((string) $existing);
+    $newLen = strlen((string) $candidate);
+    $reason = '';
+    if ($oldLen < 12000 || $newLen >= (int) floor($oldLen * 0.55)) {
+        return false;
+    }
+
+    $oldP = preg_match_all('/<p\b/i', $existing);
+    $newP = preg_match_all('/<p\b/i', $candidate);
+    $oldDiv = preg_match_all('/<div\b/i', $existing);
+    $newDiv = preg_match_all('/<div\b/i', $candidate);
+    $oldTable = preg_match_all('/<table\b/i', $existing);
+    $newTable = preg_match_all('/<table\b/i', $candidate);
+
+    $lostParagraphs = $oldP >= 5 && $newP < max(1, (int) floor($oldP * 0.25));
+    $lostDivs = $oldDiv >= 8 && $newDiv < max(1, (int) floor($oldDiv * 0.25));
+    $lostTables = $oldTable >= 3 && $newTable < max(1, (int) floor($oldTable * 0.25));
+    if (!$lostParagraphs && !$lostDivs && !$lostTables) {
+        return false;
+    }
+
+    $reason = 'Fisierul ar scadea de la ' . $oldLen . ' la ' . $newLen
+        . ' bytes si ar pierde structura HTML principala.';
+    return true;
+}
+
+function create_pre_save_backup($full)
+{
+    if (!is_file($full)) {
+        return false;
+    }
+    $backupDir = dirname($full) . DIRECTORY_SEPARATOR . '.mini-dreamweaver-backups';
+    if (!is_dir($backupDir) && !@mkdir($backupDir, 0777, true)) {
+        return false;
+    }
+    $now = microtime(true);
+    $micro = sprintf('%06d', (int) (($now - floor($now)) * 1000000));
+    $backupName = basename($full) . '.before-save-' . date('Ymd-His') . '-' . $micro . '.bak';
+    $backupPath = $backupDir . DIRECTORY_SEPARATOR . $backupName;
+    if (!@copy($full, $backupPath)) {
+        return false;
+    }
+
+    $pattern = $backupDir . DIRECTORY_SEPARATOR . basename($full) . '.before-save-*.bak';
+    $copies = glob($pattern) ?: [];
+    usort($copies, function ($a, $b) {
+        return (@filemtime($b) ?: 0) <=> (@filemtime($a) ?: 0);
+    });
+    foreach (array_slice($copies, 25) as $oldCopy) {
+        @unlink($oldCopy);
+    }
+    return $backupPath;
+}
+
+/** Remove stray </span> tags that have no matching opening <span> inside a text paragraph. */
+function remove_orphan_closing_spans_from_paragraphs_php($html)
+{
+    return preg_replace_callback(
+        '/(<p\b[^>]*\bclass\s*=\s*["\'][^"\']*\btext_obisnuit2?\b[^"\']*["\'][^>]*>)([\s\S]*?)(<\/p>)/i',
+        function ($m) {
+            $depth = 0;
+            $inner = preg_replace_callback(
+                '/<\/?span\b[^>]*>/i',
+                function ($tag) use (&$depth) {
+                    if (preg_match('/^<\s*span\b/i', $tag[0])) {
+                        $depth++;
+                        return $tag[0];
+                    }
+                    if ($depth > 0) {
+                        $depth--;
+                        return $tag[0];
+                    }
+                    return '';
+                },
+                $m[2]
+            );
+            return $m[1] . $inner . $m[3];
+        },
+        (string) $html
+    );
+}
+
+function normalize_full_text_obisnuit2_span_paragraphs_php($html)
+{
+    $html = remove_orphan_closing_spans_from_paragraphs_php($html);
+    return preg_replace_callback(
+        '/(<p\b[^>]*\bclass\s*=\s*["\'][^"\']*\btext_obisnuit\b[^"\']*["\'][^>]*>)\s*<span\b[^>]*\bclass\s*=\s*["\'][^"\']*\btext_obisnuit2\b[^"\']*["\'][^>]*>([\s\S]*?)<\/span>\s*(<\/p>)/i',
+        function ($m) {
+            return $m[1] . $m[2] . $m[3];
+        },
+        (string) $html
+    );
+}
+
+/** Text simplu din interiorul unui tag (fără alte tag-uri). */
+function normalize_text_paragraph_inline_formatting_php($html)
+{
+    $html = preg_replace_callback(
+        '/(<p\b[^>]*\bclass\s*=\s*["\'][^"\']*\btext_obisnuit2?\b[^"\']*["\'][^>]*>)([\s\S]*?)(<\/p>)/i',
+        function ($m) {
+            $depths = [];
+            $inner = preg_replace('/<i\s*>/i', '<em>', $m[2]);
+            $inner = preg_replace('/<\/i>/i', '</em>', $inner);
+            $inner = preg_replace_callback(
+                '/<\/?(em|strong|u)\b[^>]*>/i',
+                function ($tag) use (&$depths) {
+                    $name = strtolower($tag[1]);
+                    if (!isset($depths[$name])) $depths[$name] = 0;
+                    if (preg_match('/^<\s*' . preg_quote($name, '/') . '\b/i', $tag[0])) {
+                        $depths[$name]++;
+                        return $tag[0];
+                    }
+                    if ($depths[$name] > 0) {
+                        $depths[$name]--;
+                        return $tag[0];
+                    }
+                    return '';
+                },
+                $inner
+            );
+            do {
+                $before = $inner;
+                $inner = preg_replace('/<(em|strong|u)\b[^>]*>\s*<\/\1>/i', '', $inner);
+                $inner = preg_replace('/<em>\s*<em>/i', '<em>', $inner);
+                $inner = preg_replace('/<\/em>\s*<\/em>/i', '</em>', $inner);
+            } while ($inner !== $before);
+            return $m[1] . $inner . $m[3];
+        },
+        (string) $html
+    );
+    return preg_replace(
+        '/^[\t ]*<p\b[^>]*\bclass\s*=\s*["\'][^"\']*\btext_obisnuit2?\b[^"\']*["\'][^>]*>\s*(?:<(?:em|i|strong|b|u)\b[^>]*>\s*<\/(?:em|i|strong|b|u)>\s*)+<\/p>\s*\r?\n?/mi',
+        '',
+        $html
+    );
+}
+
+/**
+ * In zona articolului, muta inchiderile de paragraf ramase singure pe randul urmator
+ * la sfarsitul textului: "text\n</p>" -> "text</p>" si
+ * "text\n</em></p>" -> "text</em></p>".
+ */
+function join_sasa_paragraph_closing_tags_php($html)
+{
+    return preg_replace_callback(
+        '/(<!--\s*SASA-1\s*-->)([\s\S]*?)(<!--\s*SASA-2\s*-->)/i',
+        function ($zone) {
+            $body = preg_replace_callback(
+                '/(<p\b[^>]*\bclass\s*=\s*["\'][^"\']*\btext_obisnuit2?\b[^"\']*["\'][^>]*>)([\s\S]*?)(<\/p>)/i',
+                function ($paragraph) {
+                    $inner = preg_replace(
+                        '/[\t ]*(?:\r?\n[\t ]*)+(?=(?:<\/(?:em|i|strong|b|u)>[\t ]*)*$)/i',
+                        '',
+                        $paragraph[2]
+                    );
+                    return $paragraph[1] . $inner . $paragraph[3];
+                },
+                $zone[2]
+            );
+            return $zone[1] . $body . $zone[3];
+        },
+        (string) $html
+    );
+}
+
+function plain_text_from_html_inner($inner)
+{
+    $x = preg_replace('/<br\s*\/?>/i', ' ', (string) $inner);
+    $x = strip_tags($x);
+    $x = html_entity_decode($x, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    return trim(preg_replace('/\s+/u', ' ', $x));
+}
+
+/**
+ * Primul <p class="text_obisnuit2"> imediat după <!-- SASA-1 --> (cu sau fără <em>).
+ */
+function extract_article_sasa_teaser_plain($html)
+{
+    $norm = str_replace(["\r\n", "\r"], "\n", (string) $html);
+    if (!preg_match('/<!--\s*SASA-1\s*-->/i', $norm, $m, PREG_OFFSET_CAPTURE)) {
+        return null;
+    }
+    $slice = substr($norm, $m[0][1] + strlen($m[0][0]));
+    if (!preg_match(
+        '/^\s*(?:<!--[\s\S]*?-->\s*)*<p\b[^>]*\bclass\s*=\s*["\'][^"\']*\btext_obisnuit2\b[^"\']*["\'][^>]*>([\s\S]*?)<\/p>/i',
+        $slice,
+        $pm
+    )) {
+        return null;
+    }
+    $text = plain_text_from_html_inner($pm[1]);
+    return $text !== '' ? $text : null;
+}
+
+function escape_meta_description_attr_value_php($s)
+{
+    $s = str_replace(['&', '"', '<', '>'], ['&amp;', '&quot;', '&lt;', '&gt;'], (string) $s);
+    return trim(preg_replace('/\s+/u', ' ', str_replace(["\r\n", "\r", "\n"], ' ', $s)));
+}
+
+function escape_json_description_value_php($s)
+{
+    $s = trim(preg_replace('/\s+/u', ' ', str_replace(["\r\n", "\r", "\n"], ' ', (string) $s)));
+    $enc = json_encode($s, JSON_UNESCAPED_UNICODE);
+    if ($enc === false || strlen($enc) < 2) {
+        return '';
+    }
+    return substr($enc, 1, -1);
+}
+
+/** La save: meta description, og:description, JSON-LD description din primul text_obisnuit2 după SASA-1. */
+function apply_sasa_teaser_to_meta_description_php($html)
+{
+    $teaser = extract_article_sasa_teaser_plain($html);
+    if ($teaser === null || $teaser === '') {
+        return $html;
+    }
+    $metaEsc = escape_meta_description_attr_value_php($teaser);
+    $jsonEsc = escape_json_description_value_php($teaser);
+    $out = (string) $html;
+
+    $metaPatterns = [
+        '/(<meta\s+name\s*=\s*["\']description["\']\s+content\s*=\s*["\'])([^"\']*)(["\'])/i',
+        '/(<meta\s+content\s*=\s*["\'])([^"\']*)(["\']\s+name\s*=\s*["\']description["\'])/i',
+    ];
+    foreach ($metaPatterns as $re) {
+        if (preg_match($re, $out)) {
+            $out = preg_replace($re, '${1}' . $metaEsc . '${3}', $out, 1);
+            break;
+        }
+    }
+
+    $ogPatterns = [
+        '/(<meta\s+property\s*=\s*["\']og:description["\']\s+content\s*=\s*["\'])([^"\']*)(["\'])/i',
+        '/(<meta\s+content\s*=\s*["\'])([^"\']*)(["\']\s+property\s*=\s*["\']og:description["\'])/i',
+    ];
+    foreach ($ogPatterns as $re) {
+        if (preg_match($re, $out)) {
+            $out = preg_replace($re, '${1}' . $metaEsc . '${3}', $out, 1);
+            break;
+        }
+    }
+
+    $out = preg_replace_callback(
+        '/(<script[^>]*\btype\s*=\s*["\']application\/ld\+json["\'][^>]*>)([\s\S]*?)(<\/script>)/i',
+        function ($m) use ($jsonEsc) {
+            $newJson = preg_replace(
+                '/("description"\s*:\s*")((?:\\\\.|[^"\\\\])*)(")/i',
+                '${1}' . $jsonEsc . '${3}',
+                $m[2]
+            );
+            if ($newJson === $m[2]) {
+                return $m[0];
+            }
+            return $m[1] . $newJson . $m[3];
+        },
+        $out
+    );
+
+    return $out;
+}
+
+/** Păstrează la sync/save blocul <!-- JavaScript --> + <script> din body (preview-ul le elimină). */
+function merge_body_with_protected_script_tail_php($origInner, $designInner)
+{
+    if (preg_match('/<script\b/i', $designInner)) {
+        return $designInner;
+    }
+    if (!preg_match('/<script\b/i', $origInner)) {
+        return $designInner;
+    }
+    if (preg_match('/<!--\s*JavaScript\s*-->/i', $origInner, $m, PREG_OFFSET_CAPTURE)) {
+        $tail = substr($origInner, $m[0][1]);
+        $core = $designInner;
+        if (preg_match('/<!--\s*JavaScript\s*-->/i', $core, $dm, PREG_OFFSET_CAPTURE)) {
+            $core = substr($core, 0, $dm[0][1]);
+        }
+        return rtrim($core) . "\n    " . rtrim($tail) . "\n";
+    }
+    if (preg_match_all('/<script\b[^>]*>[\s\S]*?<\/script>/i', $origInner, $scripts) && !empty($scripts[0])) {
+        $core = preg_replace('/(?:\s*<!--(?:(?!-->)[\s\S])*-->[\s]*)+$/', '', $designInner);
+        return rtrim($core) . "\n    " . implode("\n    ", $scripts[0]) . "\n";
+    }
+    return $designInner;
+}
+
+function restore_protected_body_scripts_php($originalHtml, $newHtml)
+{
+    if (!preg_match('/<body([^>]*)>[\s\S]*<\/body>/i', $originalHtml, $om)) {
+        return $newHtml;
+    }
+    if (!preg_match('/<body([^>]*)>([\s\S]*)<\/body>/i', $newHtml, $nm)) {
+        return $newHtml;
+    }
+    $origInner = preg_replace('/^<body[^>]*>/i', '', $om[0]);
+    $origInner = preg_replace('/<\/body>$/i', '', $origInner);
+    $mergedInner = merge_body_with_protected_script_tail_php($origInner, $nm[2]);
+    if ($mergedInner === $nm[2]) {
+        return $newHtml;
+    }
+    return preg_replace(
+        '/<body[^>]*>[\s\S]*<\/body>/i',
+        '<body' . $nm[1] . '>' . $mergedInner . '</body>',
+        $newHtml,
+        1
+    );
+}
+
+define('ARTICLE_PAGE_TITLE_SUFFIX', ' | Neculai Fantanaru');
+
+/**
+ * Titlul articolului din <h1 class="custom-h1 article-title"> sau <h1 class="den_articol">.
+ */
+function extract_article_h1_title_plain_php($html)
+{
+    $norm = str_replace(["\r\n", "\r"], "\n", (string) $html);
+    if (preg_match(
+        '/<h1\b(?=[^>]*\bcustom-h1\b)(?=[^>]*\barticle-title\b)[^>]*>([\s\S]*?)<\/h1>/i',
+        $norm,
+        $m
+    )) {
+        $text = plain_text_from_html_inner($m[1]);
+        if ($text !== '') {
+            return $text;
+        }
+    }
+    if (preg_match(
+        '/<h1\b[^>]*\bclass\s*=\s*["\'][^"\']*\bden_articol\b[^"\']*["\'][^>]*>([\s\S]*?)<\/h1>/i',
+        $norm,
+        $m2
+    )) {
+        $text = plain_text_from_html_inner($m2[1]);
+        if ($text !== '') {
+            return $text;
+        }
+    }
+    return null;
+}
+
+function build_article_page_title_from_h1_php($h1Plain)
+{
+    $core = trim(preg_replace('/\s+/u', ' ', (string) $h1Plain));
+    if ($core === '') {
+        return '';
+    }
+    return $core . ARTICLE_PAGE_TITLE_SUFFIX;
+}
+
+/** La save: title, og:title, abstract, Subject, JSON-LD headline/name din H1 articol. */
+function apply_h1_to_page_titles_php($html)
+{
+    $h1Plain = extract_article_h1_title_plain_php($html);
+    if ($h1Plain === null || $h1Plain === '') {
+        return $html;
+    }
+    $titleFull = build_article_page_title_from_h1_php($h1Plain);
+    if ($titleFull === '') {
+        return $html;
+    }
+    $metaEsc = escape_meta_description_attr_value_php($titleFull);
+    $jsonEsc = escape_json_description_value_php($titleFull);
+    $out = (string) $html;
+
+    $out = preg_replace('/(<title[^>]*>)([\s\S]*?)(<\/title>)/i', '${1}' . $metaEsc . '${3}', $out, 1);
+
+    $ogTitlePatterns = [
+        '/(<meta\s+property\s*=\s*["\']og:title["\']\s+content\s*=\s*["\'])([^"\']*)(["\'])/i',
+        '/(<meta\s+content\s*=\s*["\'])([^"\']*)(["\']\s+property\s*=\s*["\']og:title["\'])/i',
+    ];
+    foreach ($ogTitlePatterns as $re) {
+        if (preg_match($re, $out)) {
+            $out = preg_replace($re, '${1}' . $metaEsc . '${3}', $out, 1);
+            break;
+        }
+    }
+
+    $namedMetaPatterns = [
+        '/(<meta\s+name\s*=\s*["\']abstract["\']\s+content\s*=\s*["\'])([^"\']*)(["\'])/i',
+        '/(<meta\s+content\s*=\s*["\'])([^"\']*)(["\']\s+name\s*=\s*["\']abstract["\'])/i',
+        '/(<meta\s+name\s*=\s*["\']Subject["\']\s+content\s*=\s*["\'])([^"\']*)(["\'])/i',
+        '/(<meta\s+content\s*=\s*["\'])([^"\']*)(["\']\s+name\s*=\s*["\']Subject["\'])/i',
+    ];
+    foreach ($namedMetaPatterns as $re) {
+        if (preg_match($re, $out)) {
+            $out = preg_replace($re, '${1}' . $metaEsc . '${3}', $out, 1);
+        }
+    }
+
+    $suffixRe = preg_quote(ARTICLE_PAGE_TITLE_SUFFIX, '/');
+    $out = preg_replace_callback(
+        '/(<script[^>]*\btype\s*=\s*["\']application\/ld\+json["\'][^>]*>)([\s\S]*?)(<\/script>)/i',
+        function ($m) use ($jsonEsc, $suffixRe) {
+            $jsonBody = $m[2];
+            $newJson = preg_replace(
+                '/("headline"\s*:\s*")((?:\\\\.|[^"\\\\])*)(")/i',
+                '${1}' . $jsonEsc . '${3}',
+                $jsonBody
+            );
+            $newJson = preg_replace_callback(
+                '/("name"\s*:\s*")((?:\\\\.|[^"\\\\])*)(")/i',
+                function ($nm) use ($jsonEsc, $suffixRe) {
+                    if (!preg_match('/' . $suffixRe . '\s*$/i', $nm[2])) {
+                        return $nm[0];
+                    }
+                    return $nm[1] . $jsonEsc . $nm[3];
+                },
+                $newJson
+            );
+            if ($newJson === $jsonBody) {
+                return $m[0];
+            }
+            return $m[1] . $newJson . $m[3];
+        },
+        $out
+    );
+
+    return $out;
+}
+
 // --- Asset proxy: serve any file from disk (CSS, JS, images, etc.) ---
 $pathInfo = isset($_SERVER['PATH_INFO']) ? $_SERVER['PATH_INFO'] : '';
 if (strpos($pathInfo, '/asset/') === 0) {
@@ -260,7 +681,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'preview') {
 
                 // DOMContentLoaded notification script (our only injected script)
                 $domReadyScript = '<script>document.addEventListener("DOMContentLoaded",function(){'
-                    . 'try{if(window.parent&&window.parent.__previewDOMReady)window.parent.__previewDOMReady();}catch(e){}'
+                    . 'try{if(window.parent&&window.parent.__previewDOMReady)window.parent.__previewDOMReady(window.location.href);}catch(e){}'
                     . '});</script>';
 
                 // Override CSS — force ALL elements to be visible.
@@ -304,6 +725,140 @@ if (isset($_GET['action']) && $_GET['action'] === 'preview') {
 if (isset($_GET['action'])) {
     $action = $_GET['action'];
     header('Content-Type: application/json; charset=utf-8');
+
+    // Versiunea editorului (data modificarii acestui fisier) — pagina o compara ca sa ceara reincarcare.
+    if ($action === 'version') {
+        clearstatcache(true, __FILE__);
+        echo json_encode(['ok' => true, 'v' => (string) filemtime(__FILE__)]);
+        exit;
+    }
+
+    // Butonul „Trimite E-mail”: ruleaza in fundal monitor_index.py (care trimite pe email ultimul articol din ro/index.html)
+    // si intoarce tot ce a afisat scriptul. Cu check=1 doar verifica (Python, script, articolul care s-ar trimite) — NU trimite.
+    if ($action === 'sendArticleEmail' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $scriptDir = 'e:/Carte/BB/17 - Site Leadership/alte/Ionel Balauta/Aryeht/Task 1 - Traduce tot site-ul/Doar Google Web/Andreea/Meditatii/2023/MAIL TEXT';
+        $script = $scriptDir . '/monitor_index.py';
+        $indexRo = 'e:/Carte/BB/17 - Site Leadership/Principal/ro/index.html';
+        $python = 'C:/Users/necul/AppData/Local/Programs/Python/Python312/python.exe';
+        if (!is_file($python)) $python = 'python';
+        if (!is_file($script)) {
+            echo json_encode(['ok' => false, 'error' => 'Nu gasesc scriptul: ' . $script], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        // Articolul pe care il va trimite scriptul (acelasi regex ca in monitor_index.py)
+        $articleLink = '';
+        $idx = @file_get_contents($indexRo);
+        if ($idx !== false && preg_match('/<td><span class="den_articol"><a href="([^"]+)" class="linkMare">([^<]*)/', $idx, $am)) {
+            $articleLink = $am[1];
+            $articleTitle = html_entity_decode($am[2], ENT_QUOTES, 'UTF-8');
+        }
+        if (!empty($_POST['check'])) {
+            echo json_encode(['ok' => true, 'python' => $python, 'link' => $articleLink,
+                'title' => isset($articleTitle) ? $articleTitle : ''], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        @set_time_limit(300);
+        $env = getenv();
+        if (!is_array($env)) $env = [];
+        $pyDir = ($python !== 'python') ? str_replace('/', '\\', dirname($python)) : '';
+        $pathKey = 'PATH';
+        foreach ($env as $k => $v) { if (strtoupper($k) === 'PATH') { $pathKey = $k; break; } }
+        if ($pyDir !== '') $env[$pathKey] = $pyDir . ';' . (isset($env[$pathKey]) ? $env[$pathKey] : '');
+        $env['PYTHONIOENCODING'] = 'utf-8';
+        $env['PYTHONUTF8'] = '1';
+        $proc = proc_open([$python, '-u', 'monitor_index.py'],
+            [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes, $scriptDir, $env, ['bypass_shell' => true, 'create_process_group' => false]);
+        if (!is_resource($proc)) {
+            echo json_encode(['ok' => false, 'error' => 'Nu am putut porni Python (' . $python . ').'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        fclose($pipes[0]);
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+        $out = '';
+        $err = '';
+        $start = time();
+        $timedOut = false;
+        while (true) {
+            $status = proc_get_status($proc);
+            $out .= (string) stream_get_contents($pipes[1]);
+            $err .= (string) stream_get_contents($pipes[2]);
+            if (!$status['running']) break;
+            if (time() - $start > 240) { $timedOut = true; proc_terminate($proc); break; }
+            usleep(150000);
+        }
+        $out .= (string) stream_get_contents($pipes[1]);
+        $err .= (string) stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exit = proc_close($proc);
+        if (isset($status['exitcode']) && $status['exitcode'] !== -1) $exit = $status['exitcode'];
+        $sent = (strpos($out, 'Email trimis cu succes!') !== false);
+        echo json_encode(['ok' => true, 'sent' => $sent, 'output' => $out, 'errors' => $err,
+            'exitCode' => $exit, 'timedOut' => $timedOut, 'link' => $articleLink], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    // Cele mai noi N articole dintr-un folder (ro/ sau en/), dupa data „On Luna zi, an” de sub <h1 class="den_articol">.
+    // Paginile de categorii/index nu au <h1 den_articol>, deci sunt ignorate.
+    // Cache in folderul temp: un fisier e recitit doar daca i s-a schimbat data modificarii.
+    if ($action === 'recentArticles') {
+        $dir = rtrim(resolve_path(isset($_GET['dir']) ? $_GET['dir'] : '', $ROOT), '/');
+        $limit = max(1, min(10, (int) (isset($_GET['n']) ? $_GET['n'] : 2)));
+        @set_time_limit(300); // prima citire (fara cache) poate dura pe un disc lent
+        if ($dir === '' || !is_dir($dir)) {
+            echo json_encode(['ok' => false, 'error' => 'Folderul nu exista: ' . $dir], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        $months = ['ianuarie' => 1, 'februarie' => 2, 'martie' => 3, 'aprilie' => 4, 'mai' => 5, 'iunie' => 6,
+            'iulie' => 7, 'august' => 8, 'septembrie' => 9, 'octombrie' => 10, 'noiembrie' => 11, 'decembrie' => 12,
+            'january' => 1, 'february' => 2, 'march' => 3, 'april' => 4, 'may' => 5, 'june' => 6,
+            'july' => 7, 'september' => 9, 'october' => 10, 'november' => 11, 'december' => 12];
+        $cacheFile = sys_get_temp_dir() . '/htmleditor_article_dates_' . md5(strtolower($dir)) . '.json';
+        $cache = [];
+        if (is_file($cacheFile)) {
+            $tmp = json_decode((string) @file_get_contents($cacheFile), true);
+            if (is_array($tmp)) $cache = $tmp;
+        }
+        $newCache = [];
+        $list = [];
+        foreach ((array) @scandir($dir) as $name) {
+            if (!preg_match('/\.html?$/i', $name)) continue;
+            $path = $dir . '/' . $name;
+            $mtime = @filemtime($path);
+            if ($mtime === false) continue;
+            if (isset($cache[$name]) && $cache[$name]['m'] === $mtime) {
+                $entry = $cache[$name];
+            } else {
+                $entry = ['m' => $mtime, 't' => null, 'd' => ''];
+                $head = @file_get_contents($path, false, null, 0, 120000);
+                if ($head !== false &&
+                    preg_match('/<h1\b[^>]*class\s*=\s*["\'][^"\']*\bden_articol\b/i', $head, $hm, PREG_OFFSET_CAPTURE) &&
+                    preg_match('/class\s*=\s*["\'][^"\']*\btext_dreapta\b[^"\']*["\'][^>]*>(.*?)<\/td>/is', substr($head, $hm[0][1]), $td)) {
+                    $plain = trim(preg_replace('/\s+/u', ' ', str_ireplace(['&nbsp;', '&#160;'], ' ', strip_tags($td[1]))));
+                    if (preg_match('/\bOn\s+([^\s\d,]+)\s+(\d{1,2}),?\s+(\d{4})\b/iu', $plain, $dm)) {
+                        $mon = strtolower($dm[1]);
+                        if (isset($months[$mon]) && checkdate($months[$mon], (int) $dm[2], (int) $dm[3])) {
+                            $entry['t'] = mktime(0, 0, 0, $months[$mon], (int) $dm[2], (int) $dm[3]);
+                            $entry['d'] = $dm[0];
+                        }
+                    }
+                }
+            }
+            $newCache[$name] = $entry;
+            if ($entry['t'] !== null) {
+                $list[] = ['file' => $path, 'ts' => $entry['t'], 'date' => $entry['d'], 'mtime' => $mtime];
+            }
+        }
+        @file_put_contents($cacheFile, json_encode($newCache));
+        usort($list, function ($a, $b) {
+            if ($a['ts'] !== $b['ts']) return $b['ts'] - $a['ts'];
+            return $b['mtime'] - $a['mtime'];
+        });
+        echo json_encode(['ok' => true, 'articles' => array_slice($list, 0, $limit)], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
 
     if ($action === 'list') {
         $root = rtrim($ROOT, "/");
@@ -474,6 +1029,11 @@ if (isset($_GET['action'])) {
     if ($action === 'save' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         $file = isset($_POST['file']) ? $_POST['file'] : '';
         $full = resolve_path($file, $ROOT);
+        // Template-ul pentru butonul NEW nu se suprascrie niciodata din editor.
+        if (in_array(strtolower(basename(str_replace('\\', '/', $full))), ['model-new', 'model-new.html'], true)) {
+            echo json_encode(['ok' => false, 'error' => 'model-new este template si nu poate fi suprascris. Schimba CANONICAL LINK si salveaza ca pagina noua.'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
         $dir = dirname($full);
         if (!is_dir($dir)) {
             echo json_encode(['ok' => false, 'error' => 'Directorul nu exista: ' . $dir]);
@@ -481,11 +1041,47 @@ if (isset($_GET['action'])) {
         }
         $content = isset($_POST['content']) ? $_POST['content'] : '';
         $extSave = strtolower(pathinfo($full, PATHINFO_EXTENSION));
+        $metaSynced = false;
+        $existingOnDisk = file_exists($full) ? read_file_as_utf8($full) : false;
         if (($extSave === 'html' || $extSave === 'htm') && $content !== '') {
+            $beforeMeta = $content;
+            $content = remove_orphan_closing_spans_from_paragraphs_php($content);
+            $content = normalize_text_paragraph_inline_formatting_php($content);
+            $content = join_sasa_paragraph_closing_tags_php($content);
             $content = align_saved_html_charset_declaration_utf8($content);
+            $content = apply_sasa_teaser_to_meta_description_php($content);
+            $content = apply_h1_to_page_titles_php($content);
+            if ($existingOnDisk !== false) {
+                $content = restore_protected_body_scripts_php($existingOnDisk, $content);
+            }
+            $metaSynced = ($content !== $beforeMeta);
         }
-        file_put_contents($full, $content);
-        echo json_encode(['ok' => true, 'file' => $full]);
+        if ($existingOnDisk !== false && ($extSave === 'html' || $extSave === 'htm')) {
+            $truncateReason = '';
+            if (html_save_is_catastrophically_truncated($existingOnDisk, $content, $truncateReason)) {
+                echo json_encode([
+                    'ok' => false,
+                    'error' => 'Salvare blocata pentru protectia datelor. ' . $truncateReason
+                ], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+        }
+
+        $backupPath = ($existingOnDisk !== false) ? create_pre_save_backup($full) : false;
+        $written = @file_put_contents($full, $content, LOCK_EX);
+        if ($written === false || $written !== strlen($content)) {
+            if ($backupPath && is_file($backupPath)) {
+                @copy($backupPath, $full);
+            }
+            echo json_encode(['ok' => false, 'error' => 'Scriere incompleta; fisierul anterior a fost restaurat.']);
+            exit;
+        }
+        echo json_encode([
+            'ok' => true,
+            'file' => $full,
+            'metaSynced' => $metaSynced,
+            'backup' => $backupPath ? str_replace('\\', '/', $backupPath) : null
+        ]);
         exit;
     }
 
@@ -1660,7 +2256,11 @@ if (isset($_GET['action'])) {
             </div>
             <input type="file" id="filePicker" accept=".html,.htm,.css,.js,.php" style="display:none">
             <div class="overlay-actions">
-                <button class="btn btn-ghost" onclick="hideOverlay()">Continua la editor</button>
+                <button class="btn" id="btnSendArticleEmail" onclick="sendLatestArticleEmail()"
+                    title="Trimite pe email ultimul articol din ro/index.html (ruleaza monitor_index.py in fundal)"
+                    style="background:#16a34a;color:#fff;border-color:#15803d"><i class="fas fa-envelope"></i> Trimite E-mail</button>
+                <button class="btn btn-primary" onclick="openNewFromModel()" title="Deschide model.html">NEW</button>
+                <button class="btn btn-ghost" onclick="continueToEditor()">Continua la editor</button>
             </div>
         </div>
     </div>
@@ -1716,7 +2316,7 @@ if (isset($_GET['action'])) {
         </div>
         <div id="tabBarSpacer" style="flex:1"></div>
         <button class="btn btn-ghost" onclick="closeActiveTab()">Inchide tab</button>
-        <button class="btn btn-primary" onclick="saveFile()">Salveaza (Ctrl+S)</button>
+        <button type="button" class="btn btn-primary" onmousedown="event.preventDefault()" onclick="saveFile()">Salveaza (Ctrl+S)</button>
     </div>
     <div class="main">
         <div class="sidebar">
@@ -1743,9 +2343,8 @@ if (isset($_GET['action'])) {
                         title="Aplică clasa text_obisnuit2 pe selecția din Design">B</button>
                     <button type="button" id="btnQuickItalic" class="btn btn-ghost"
                         title="Italic (&lt;em&gt;) pe selecția din Design (ca butonul I de jos)">I</button>
-                    <button type="button" id="btnVisualGreen" class="btn btn-ghost"
-                        title="Verde local doar in editor, fara modificare in fisier"
-                        style="color:#22c55e;font-weight:700">V</button>
+                    <button type="button" id="btnQuickUnderline" class="btn btn-ghost"
+                        title="Underline (&lt;u&gt;) pe selectia din Design">U</button>
                 </div>
                 <div class="viewmode-tabs" style="margin-left:12px">
                     <button type="button" id="btnBrowserTab" onclick="toggleBrowserPanel()"
@@ -1841,6 +2440,7 @@ if (isset($_GET['action'])) {
                 </select>
                 <button type="button" class="btn btn-ghost prop-btn" id="propBold" title="Bold">B</button>
                 <button type="button" class="btn btn-ghost prop-btn" id="propItalic" title="Italic">I</button>
+                <button type="button" class="btn btn-ghost prop-btn" id="propUnderline" title="Underline">U</button>
                 <label>Text:</label><input type="color" id="propColor" value="#000000" title="Culoare text">
                 <label>Fundal:</label><input type="color" id="propBg" value="#ffffff" title="Culoare fundal">
             </div>
@@ -1871,6 +2471,7 @@ if (isset($_GET['action'])) {
         let skipPreviewUpdateUntil = 0;
         let sidebarVisible = true;
         let lastPreviewHadBody = false;
+        let lastDesignSelectionRange = null;
 
         // --- Custom undo/redo stack for the design panel ---
         // The browser's native contentEditable undo (execCommand('undo')) does NOT
@@ -1882,8 +2483,6 @@ if (isset($_GET['action'])) {
         let designSnapshotTimer = null;
         let designCleanCode = null; // exact editor code when design undo stack was initialized
         let designCleanBodyHtml = null; // initial browser-serialized body innerHTML for dirty comparison
-        let visualGreenUndoStack = [];
-        let visualGreenRedoStack = [];
 
         // ===== MULTI-TAB SYSTEM =====
         let tabs = [];
@@ -1924,15 +2523,16 @@ if (isset($_GET['action'])) {
         }
 
         /**
-         * Textul afișat în listă (categorie) corespunde, în articole, de obicei paragrafului
-         * <p class="text_obisnuit2"><em>…</em></p> de după <!-- SASA-1 --> (nu neapărat meta).
+         * Textul pentru meta/og/JSON-LD: primul <p class="text_obisnuit2"> imediat după <!-- SASA-1 -->
+         * (cu sau fără <em> în interior).
          */
         function extractArticleSasaTeaserPlain(html) {
             const norm = String(html || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
             const sasaRe = /<!--\s*SASA-1\s*-->/i;
             const mSasa = sasaRe.exec(norm);
-            const slice = mSasa ? norm.slice(mSasa.index + mSasa[0].length) : norm;
-            const m = slice.match(/<p\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit2\b[^"']*["'][^>]*>[\s\S]*?<em\b[^>]*>([\s\S]*?)<\/em>[\s\S]*?<\/p>/i);
+            if (!mSasa) return null;
+            const slice = norm.slice(mSasa.index + mSasa[0].length);
+            const m = slice.match(/^\s*(?:<!--[\s\S]*?-->\s*)*<p\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit2\b[^"']*["'][^>]*>([\s\S]*?)<\/p>/i);
             if (!m) return null;
             return plainTextFromEmInnerHtml(m[1]);
         }
@@ -1968,21 +2568,166 @@ if (isset($_GET['action'])) {
                 .trim();
         }
 
-        /** Actualizează <meta name="description" content="…"> din textul din <em> după SASA-1. Fără tag → return html nemodificat. */
+        function escapeJsonDescriptionValue(s) {
+            return String(s || '')
+                .replace(/\\/g, '\\\\')
+                .replace(/"/g, '\\"')
+                .replace(/\r?\n/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+        }
+
+        /** Actualizează meta description, og:description și "description" din JSON-LD din primul text_obisnuit2 după SASA-1. */
         function applySasaTeaserToMetaDescription(html) {
             var teaser = extractArticleSasaTeaserPlain(html);
             if (teaser == null || teaser === '') return html;
-            var esc = escapeMetaDescriptionAttrValue(teaser);
+            var metaEsc = escapeMetaDescriptionAttrValue(teaser);
+            var jsonEsc = escapeJsonDescriptionValue(teaser);
             var out = String(html);
             var re1 = /(<meta\s+name\s*=\s*["']description["']\s+content\s*=\s*["'])([^"']*)(["'])/i;
             var re2 = /(<meta\s+content\s*=\s*["'])([^"']*)(["']\s+name\s*=\s*["']description["'])/i;
             if (re1.test(out)) {
-                return out.replace(re1, function (_, a, _old, c) { return a + esc + c; });
+                out = out.replace(re1, function (_, a, _old, c) { return a + metaEsc + c; });
+            } else if (re2.test(out)) {
+                out = out.replace(re2, function (_, a, _old, c) { return a + metaEsc + c; });
             }
-            if (re2.test(out)) {
-                return out.replace(re2, function (_, a, _old, c) { return a + esc + c; });
+            var reOg1 = /(<meta\s+property\s*=\s*["']og:description["']\s+content\s*=\s*["'])([^"']*)(["'])/i;
+            var reOg2 = /(<meta\s+content\s*=\s*["'])([^"']*)(["']\s+property\s*=\s*["']og:description["'])/i;
+            if (reOg1.test(out)) {
+                out = out.replace(reOg1, function (_, a, _old, c) { return a + metaEsc + c; });
+            } else if (reOg2.test(out)) {
+                out = out.replace(reOg2, function (_, a, _old, c) { return a + metaEsc + c; });
             }
-            return html;
+            out = out.replace(
+                /(<script[^>]*\btype\s*=\s*["']application\/ld\+json["'][^>]*>)([\s\S]*?)(<\/script>)/gi,
+                function (match, open, jsonBody, close) {
+                    var newJson = jsonBody.replace(
+                        /("description"\s*:\s*")((?:\\.|[^"\\])*)(")/gi,
+                        function (_, prefix, _old, suffix) { return prefix + jsonEsc + suffix; }
+                    );
+                    return newJson === jsonBody ? match : open + newJson + close;
+                }
+            );
+            return out;
+        }
+
+        const ARTICLE_PAGE_TITLE_SUFFIX = ' | Neculai Fantanaru';
+
+        /** Titlul articolului din <h1 class="custom-h1 article-title"> sau <h1 class="den_articol">. */
+        function extractArticleH1TitlePlain(html) {
+            const norm = String(html || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+            let m = norm.match(/<h1\b(?=[^>]*\bcustom-h1\b)(?=[^>]*\barticle-title\b)[^>]*>([\s\S]*?)<\/h1>/i);
+            if (m) {
+                const text = plainTextFromEmInnerHtml(m[1]);
+                if (text) return text;
+            }
+            m = norm.match(/<h1\b[^>]*\bclass\s*=\s*["'][^"']*\bden_articol\b[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i);
+            if (m) {
+                const text = plainTextFromEmInnerHtml(m[1]);
+                if (text) return text;
+            }
+            return null;
+        }
+
+        function buildArticlePageTitleFromH1(h1Plain) {
+            const core = String(h1Plain || '').replace(/\s+/g, ' ').trim();
+            if (!core) return '';
+            return core + ARTICLE_PAGE_TITLE_SUFFIX;
+        }
+
+        /** La save: title, og:title, abstract, Subject, JSON-LD headline/name din H1 articol. */
+        function applyH1ToPageTitles(html) {
+            const h1Plain = extractArticleH1TitlePlain(html);
+            if (h1Plain == null || h1Plain === '') return html;
+            const titleFull = buildArticlePageTitleFromH1(h1Plain);
+            if (!titleFull) return html;
+            const metaEsc = escapeMetaDescriptionAttrValue(titleFull);
+            const jsonEsc = escapeJsonDescriptionValue(titleFull);
+            let out = String(html);
+
+            out = out.replace(/(<title[^>]*>)([\s\S]*?)(<\/title>)/i, function (_, a, _old, c) { return a + metaEsc + c; });
+
+            const ogTitlePatterns = [
+                /(<meta\s+property\s*=\s*["']og:title["']\s+content\s*=\s*["'])([^"']*)(["'])/i,
+                /(<meta\s+content\s*=\s*["'])([^"']*)(["']\s+property\s*=\s*["']og:title["'])/i
+            ];
+            for (let i = 0; i < ogTitlePatterns.length; i++) {
+                if (ogTitlePatterns[i].test(out)) {
+                    out = out.replace(ogTitlePatterns[i], function (_, a, _old, c) { return a + metaEsc + c; });
+                    break;
+                }
+            }
+
+            const namedMetaPatterns = [
+                /(<meta\s+name\s*=\s*["']abstract["']\s+content\s*=\s*["'])([^"']*)(["'])/i,
+                /(<meta\s+content\s*=\s*["'])([^"']*)(["']\s+name\s*=\s*["']abstract["'])/i,
+                /(<meta\s+name\s*=\s*["']Subject["']\s+content\s*=\s*["'])([^"']*)(["'])/i,
+                /(<meta\s+content\s*=\s*["'])([^"']*)(["']\s+name\s*=\s*["']Subject["'])/i
+            ];
+            for (let j = 0; j < namedMetaPatterns.length; j++) {
+                if (namedMetaPatterns[j].test(out)) {
+                    out = out.replace(namedMetaPatterns[j], function (_, a, _old, c) { return a + metaEsc + c; });
+                }
+            }
+
+            const suffixRe = /\|\s*Neculai Fantanaru\s*$/i;
+            out = out.replace(
+                /(<script[^>]*\btype\s*=\s*["']application\/ld\+json["'][^>]*>)([\s\S]*?)(<\/script>)/gi,
+                function (match, open, jsonBody, close) {
+                    let newJson = jsonBody.replace(
+                        /("headline"\s*:\s*")((?:\\.|[^"\\])*)(")/gi,
+                        function (_, prefix, _old, suffix) { return prefix + jsonEsc + suffix; }
+                    );
+                    newJson = newJson.replace(
+                        /("name"\s*:\s*")((?:\\.|[^"\\])*)(")/gi,
+                        function (full, prefix, oldVal, suffix) {
+                            if (!suffixRe.test(oldVal)) return full;
+                            return prefix + jsonEsc + suffix;
+                        }
+                    );
+                    return newJson === jsonBody ? match : open + newJson + close;
+                }
+            );
+            return out;
+        }
+
+        // Live: la orice schimbare a H1 (Code sau Design) actualizează imediat în cod title, abstract,
+        // Subject, og:title și JSON-LD headline/name. Categoria și index-ul se aliniază la Save.
+        let liveH1TitleSyncTimer = null;
+        function scheduleLiveH1TitleSync() {
+            clearTimeout(liveH1TitleSyncTimer);
+            liveH1TitleSyncTimer = setTimeout(runLiveH1TitleSync, 300);
+        }
+
+        function runLiveH1TitleSync() {
+            liveH1TitleSyncTimer = null;
+            if (!editor || _isRestoringTab || !isCurrentFileHtml()) return;
+            let tab = null;
+            for (let i = 0; i < tabs.length; i++) { if (tabs[i].id === activeTabId) { tab = tabs[i]; break; } }
+            if (!tab || tab.type === 'browser') return;
+            const src = editor.getValue();
+            const h1 = extractArticleH1TitlePlain(src);
+            if (!h1) return;
+            if (tab.liveH1Seen === undefined) tab.liveH1Seen = extractArticleH1TitlePlain(tab.originalContent || '');
+            if (h1 === tab.liveH1Seen) return;
+            tab.liveH1Seen = h1;
+            const out = applyH1ToPageTitles(src);
+            if (out === src) return;
+            // Înlocuiește doar porțiunea care diferă (din <head>) — cursorul/scroll-ul din body rămân pe loc.
+            let pre = 0;
+            const maxPre = Math.min(src.length, out.length);
+            while (pre < maxPre && src.charCodeAt(pre) === out.charCodeAt(pre)) pre++;
+            let suf = 0;
+            const maxSuf = Math.min(src.length, out.length) - pre;
+            while (suf < maxSuf && src.charCodeAt(src.length - 1 - suf) === out.charCodeAt(out.length - 1 - suf)) suf++;
+            const doc = editor.getDoc();
+            const wasSync = isSyncFromDesign;
+            isSyncFromDesign = true;
+            try {
+                doc.replaceRange(out.slice(pre, out.length - suf), doc.posFromIndex(pre), doc.posFromIndex(src.length - suf), '+h1titles');
+            } finally {
+                isSyncFromDesign = wasSync;
+            }
         }
 
         function createTabState(opts) {
@@ -2014,7 +2759,8 @@ if (isset($_GET['action'])) {
                 designCleanCode: null, // baseline editor text when design snapshot was taken (cross-tab undo / dirty)
                 categorySyncDescriptionBaseline: getCategorySyncDescriptionFromArticleHtml(_oc),
                 linkedCategoryPath: null,
-                linkedArticleKey: null
+                linkedArticleKey: null,
+                protectedBodyScriptTail: opts.protectedBodyScriptTail || extractProtectedBodyScriptTail(_oc) || null
             };
         }
 
@@ -2134,6 +2880,20 @@ if (isset($_GET['action'])) {
             // Scroll active tab into view
             var activeEl = bar.querySelector('.editor-tab.active');
             if (activeEl) activeEl.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
+        }
+
+        // Saving changes a tab's label/dirty state, not the tab list or its scroll position.
+        function updateTabPresentation(tab) {
+            const bar = document.getElementById('tabBar');
+            if (!bar || !tab) return;
+            const el = Array.from(bar.querySelectorAll('.editor-tab')).find(node =>
+                node.dataset.tabId === String(tab.id));
+            if (!el) return;
+            el.classList.toggle('dirty', !!tab.isDirty);
+            el.title = tab.fullTitle || tab.tabLabel;
+            const label = el.querySelector('.tab-label');
+            const text = (tab.type === 'browser' ? '🌐 ' : '') + tab.tabLabel;
+            if (label && label.textContent !== text) label.textContent = text;
         }
 
         function saveCurrentTabState() {
@@ -2300,6 +3060,10 @@ if (isset($_GET['action'])) {
             var tab = null, idx = -1;
             for (var i = 0; i < tabs.length; i++) { if (tabs[i].id === tabId) { tab = tabs[i]; idx = i; break; } }
             if (!tab) return;
+            if (tab.type !== 'browser' && !await checkArticleIdentity(tab, true)) return;
+            idx = tabs.findIndex(t => t.id === tabId);
+            if (idx < 0) return;
+            scheduleRecentArticlesCheck();
 
             // Browser tabs: close popup window, no save prompt needed
             if (tab.type === 'browser') {
@@ -2377,7 +3141,6 @@ if (isset($_GET['action'])) {
                 document.getElementById('preview').src = 'about:blank';
                 designUndoStack = [];
                 designRedoStack = [];
-                clearVisualGreenHistory();
                 lastDesignSnapshot = null;
                 if (typeof deactivateSasa === 'function') deactivateSasa();
                 if (typeof deactivateCrop === 'function' && cropHighlightActive) deactivateCrop();
@@ -2408,6 +3171,7 @@ if (isset($_GET['action'])) {
         }
 
         function onNewTabClick() {
+            scheduleIndexOrderCheck();
             saveCurrentTabState();
             if (typeof deactivateSasa === 'function') deactivateSasa();
             if (typeof deactivateCrop === 'function' && cropHighlightActive) deactivateCrop();
@@ -2416,6 +3180,59 @@ if (isset($_GET['action'])) {
 
         // ===== BACKUP SYSTEM =====
         var _backupTimer = null;
+        var _backupOwnerId = (function () {
+            try {
+                if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+                    return window.crypto.randomUUID();
+                }
+            } catch (e) { }
+            return 'window-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+        })();
+
+        function readBackupRecords() {
+            try {
+                var raw = localStorage.getItem('htmlEditorBackupTabs');
+                if (!raw) return [];
+                var arr = JSON.parse(raw);
+                return Array.isArray(arr) ? arr : [];
+            } catch (e) {
+                return [];
+            }
+        }
+
+        function writeBackupRecords(records) {
+            try {
+                if (records.length > 0) {
+                    localStorage.setItem('htmlEditorBackupTabs', JSON.stringify(records));
+                } else {
+                    localStorage.removeItem('htmlEditorBackupTabs');
+                }
+            } catch (e) { }
+        }
+
+        function makeTabBackup(tab) {
+            return {
+                ownerId: _backupOwnerId,
+                updatedAt: Date.now(),
+                id: tab.id,
+                filePath: tab.filePath,
+                fileName: tab.fileName,
+                tabLabel: tab.tabLabel,
+                fullTitle: tab.fullTitle,
+                editorContent: tab.editorContent,
+                originalContent: tab.originalContent,
+                cursorPos: tab.cursorPos,
+                scrollInfo: tab.scrollInfo,
+                viewMode: tab.viewMode
+            };
+        }
+
+        function replaceOwnedBackups(ownedBackups) {
+            var records = readBackupRecords().filter(function (b) {
+                return b.ownerId !== _backupOwnerId;
+            });
+            writeBackupRecords(records.concat(ownedBackups));
+        }
 
         function backupDirtyTabs() {
             // Debounce — save at most every 2 seconds
@@ -2426,70 +3243,73 @@ if (isset($_GET['action'])) {
                     var dirtyTabs = [];
                     for (var i = 0; i < tabs.length; i++) {
                         if (tabs[i].isDirty && tabs[i].type !== 'browser') {
-                            dirtyTabs.push({
-                                id: tabs[i].id,
-                                filePath: tabs[i].filePath,
-                                fileName: tabs[i].fileName,
-                                tabLabel: tabs[i].tabLabel,
-                                fullTitle: tabs[i].fullTitle,
-                                editorContent: tabs[i].editorContent,
-                                originalContent: tabs[i].originalContent,
-                                cursorPos: tabs[i].cursorPos,
-                                scrollInfo: tabs[i].scrollInfo,
-                                viewMode: tabs[i].viewMode
-                            });
+                            dirtyTabs.push(makeTabBackup(tabs[i]));
                         }
                     }
-                    if (dirtyTabs.length > 0) {
-                        localStorage.setItem('htmlEditorBackupTabs', JSON.stringify(dirtyTabs));
-                    } else {
-                        localStorage.removeItem('htmlEditorBackupTabs');
-                    }
+                    replaceOwnedBackups(dirtyTabs);
                 } catch (e) { }
             }, 2000);
         }
 
         function removeTabBackup(tabId) {
             try {
-                var raw = localStorage.getItem('htmlEditorBackupTabs');
-                if (!raw) return;
-                var arr = JSON.parse(raw);
-                arr = arr.filter(function (b) { return b.id !== tabId; });
-                if (arr.length > 0) {
-                    localStorage.setItem('htmlEditorBackupTabs', JSON.stringify(arr));
-                } else {
-                    localStorage.removeItem('htmlEditorBackupTabs');
-                }
+                var arr = readBackupRecords().filter(function (b) {
+                    return !(b.ownerId === _backupOwnerId && b.id === tabId);
+                });
+                writeBackupRecords(arr);
             } catch (e) { }
         }
 
         function removeAllBackups() {
-            try { localStorage.removeItem('htmlEditorBackupTabs'); } catch (e) { }
+            replaceOwnedBackups([]);
         }
 
         async function restoreBackupTabs() {
             try {
-                var raw = localStorage.getItem('htmlEditorBackupTabs');
-                if (!raw) return;
-                var arr = JSON.parse(raw);
+                var arr = readBackupRecords();
                 if (!arr || !arr.length) return;
+                // Keep only the newest draft for each physical file. Older window
+                // copies can otherwise accumulate and make startup progressively slower.
+                arr.sort(function (a, b) {
+                    return (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0);
+                });
+                var seenBackupFiles = {};
+                arr = arr.filter(function (b) {
+                    var key = b.filePath ? String(b.filePath).replace(/\\/g, '/').toLowerCase()
+                        : 'untitled:' + String(b.ownerId || '') + ':' + String(b.id || '');
+                    if (seenBackupFiles[key]) return false;
+                    seenBackupFiles[key] = true;
+                    return true;
+                });
+                // Read disk baselines in parallel; sequential fetches made every stale
+                // backup add another visible delay to application startup.
+                var diskContents = await Promise.all(arr.map(async function (b) {
+                    if (!b.filePath) return null;
+                    try {
+                        var res = await fetch('?action=load&file=' + encodeURIComponent(b.filePath));
+                        var data = await res.json();
+                        return (data && data.ok) ? (data.content || '') : null;
+                    } catch (loadErr) {
+                        return null;
+                    }
+                }));
                 var restored = 0;
                 var keptBackups = [];
+                var consumedIndexes = [];
                 for (var i = 0; i < arr.length; i++) {
                     var b = arr[i];
                     // Skip if already open
-                    if (b.filePath && findTabByPath(b.filePath)) continue;
-                    var diskContent = null;
-                    if (b.filePath) {
-                        try {
-                            var res = await fetch('?action=load&file=' + encodeURIComponent(b.filePath));
-                            var data = await res.json();
-                            if (data && data.ok) diskContent = data.content || '';
-                        } catch (loadErr) { diskContent = null; }
+                    if (b.filePath && findTabByPath(b.filePath)) {
+                        consumedIndexes.push(i);
+                        continue;
                     }
+                    var diskContent = diskContents[i];
                     var baselineContent = (diskContent !== null) ? diskContent : (b.originalContent || '');
                     var isActuallyDirty = (normalizeHtmlForSyncCompare(b.editorContent || '') !== normalizeHtmlForSyncCompare(baselineContent));
-                    if (!isActuallyDirty) continue;
+                    if (!isActuallyDirty) {
+                        consumedIndexes.push(i);
+                        continue;
+                    }
                     var tab = createTabState({
                         filePath: b.filePath,
                         fileName: b.fileName,
@@ -2504,20 +3324,15 @@ if (isset($_GET['action'])) {
                     // Only restore backups that still differ from the real file on disk.
                     tab.isDirty = true;
                     tabs.push(tab);
-                    keptBackups.push({
-                        id: tab.id,
-                        filePath: tab.filePath,
-                        fileName: tab.fileName,
-                        tabLabel: tab.tabLabel,
-                        fullTitle: tab.fullTitle,
-                        editorContent: tab.editorContent,
-                        originalContent: tab.originalContent,
-                        cursorPos: tab.cursorPos,
-                        scrollInfo: tab.scrollInfo,
-                        viewMode: tab.viewMode
-                    });
+                    setTimeout(() => checkArticleIdentity(tab), 0);
+                    scheduleIndexOrderCheck();
+                    keptBackups.push(makeTabBackup(tab));
+                    consumedIndexes.push(i);
                     restored++;
                 }
+                var untouchedBackups = arr.filter(function (_b, idx) {
+                    return consumedIndexes.indexOf(idx) === -1 && _b.ownerId !== _backupOwnerId;
+                });
                 if (restored > 0) {
                     activeTabId = tabs[0].id;
                     restoreTabState(tabs[0]);
@@ -2525,35 +3340,15 @@ if (isset($_GET['action'])) {
                     hideOverlay();
                     // (backup restored silently — dirty star on tab is enough indication)
                     // Clean up backup for tabs that are no longer dirty
-                    localStorage.setItem('htmlEditorBackupTabs', JSON.stringify(keptBackups));
+                    writeBackupRecords(untouchedBackups.concat(keptBackups));
                 } else {
-                    localStorage.removeItem('htmlEditorBackupTabs');
+                    writeBackupRecords(untouchedBackups);
                 }
             } catch (e) { }
         }
         // ===== END BACKUP SYSTEM =====
 
         // ===== END MULTI-TAB SYSTEM =====
-
-        function unwrapEditorLocalVisualMarks(root) {
-            if (!root || !root.querySelectorAll) return;
-            Array.from(root.querySelectorAll('[data-editor-visual-badge-layer], [data-editor-visual-badge]')).forEach(function (el) {
-                if (el && el.parentNode) el.parentNode.removeChild(el);
-            });
-            Array.from(root.querySelectorAll('span[data-editor-visual-green]')).forEach(function (span) {
-                var parent = span.parentNode;
-                if (!parent) return;
-                while (span.firstChild) parent.insertBefore(span.firstChild, span);
-                parent.removeChild(span);
-            });
-        }
-
-        function stripEditorLocalVisualMarksFromHtml(html) {
-            var tmp = document.createElement('div');
-            tmp.innerHTML = String(html || '');
-            unwrapEditorLocalVisualMarks(tmp);
-            return tmp.innerHTML;
-        }
 
         function getDesignBodyHtml() {
             const iframe = document.getElementById('preview');
@@ -2562,87 +3357,11 @@ if (isset($_GET['action'])) {
             // Strip CROP highlight styles before reading so snapshots are always clean
             if (cropHighlightActive) {
                 clearSasaDesignHighlight(doc);
-                const clone = doc.body.cloneNode(true);
-                unwrapEditorLocalVisualMarks(clone);
-                const html = clone.innerHTML;
+                const html = doc.body.innerHTML;
                 highlightSasaInDesign('crop');
                 return html;
             }
-            const clone = doc.body.cloneNode(true);
-            unwrapEditorLocalVisualMarks(clone);
-            return clone.innerHTML;
-        }
-
-        function stripEditorVisualBadges(root) {
-            if (!root || !root.querySelectorAll) return;
-            Array.from(root.querySelectorAll('[data-editor-visual-badge-layer], [data-editor-visual-badge]')).forEach(function (el) {
-                if (el && el.parentNode) el.parentNode.removeChild(el);
-            });
-        }
-
-        function getVisualGreenBodyHtml() {
-            const iframe = document.getElementById('preview');
-            const doc = iframe && iframe.contentDocument;
-            if (!doc || !doc.body) return null;
-            const clone = doc.body.cloneNode(true);
-            stripEditorVisualBadges(clone);
-            return clone.innerHTML;
-        }
-
-        function clearVisualGreenHistory() {
-            visualGreenUndoStack = [];
-            visualGreenRedoStack = [];
-        }
-
-        function pushVisualGreenUndoSnapshot(html) {
-            if (html == null) html = getVisualGreenBodyHtml();
-            if (html == null) return;
-            if (visualGreenUndoStack.length > 0 && visualGreenUndoStack[visualGreenUndoStack.length - 1].html === html) return;
-            visualGreenUndoStack.push({ html: html, scrollY: getDesignScrollY() });
-            if (visualGreenUndoStack.length > 300) visualGreenUndoStack.shift();
-            visualGreenRedoStack = [];
-        }
-
-        function applyVisualGreenBodyHtml(entry) {
-            if (!entry || entry.html == null) return false;
-            const iframe = document.getElementById('preview');
-            const doc = iframe && iframe.contentDocument;
-            if (!doc || !doc.body) return false;
-            const win = iframe.contentWindow;
-            isApplyingUndoRedo = true;
-            isSyncFromCode = true;
-            doc.body.innerHTML = entry.html;
-            isSyncFromCode = false;
-            isApplyingUndoRedo = false;
-            ensureDesignWhitespaceEditingStyle(doc);
-            updateVisualGreenBadges(doc);
-            if (win) {
-                win.scrollTo(0, entry.scrollY || 0);
-                setTimeout(() => { try { win.scrollTo(0, entry.scrollY || 0); } catch (e) {} }, 50);
-            }
-            lastDesignSelectionRange = null;
-            lastDesignSelectionDoc = null;
-            return true;
-        }
-
-        function doVisualGreenUndo() {
-            if (visualGreenUndoStack.length === 0) return false;
-            const current = getVisualGreenBodyHtml();
-            if (current != null) {
-                visualGreenRedoStack.push({ html: current, scrollY: getDesignScrollY() });
-                if (visualGreenRedoStack.length > 300) visualGreenRedoStack.shift();
-            }
-            return applyVisualGreenBodyHtml(visualGreenUndoStack.pop());
-        }
-
-        function doVisualGreenRedo() {
-            if (visualGreenRedoStack.length === 0) return false;
-            const current = getVisualGreenBodyHtml();
-            if (current != null) {
-                visualGreenUndoStack.push({ html: current, scrollY: getDesignScrollY() });
-                if (visualGreenUndoStack.length > 300) visualGreenUndoStack.shift();
-            }
-            return applyVisualGreenBodyHtml(visualGreenRedoStack.pop());
+            return doc.body.innerHTML;
         }
 
         // Push current body state into the undo stack.
@@ -2714,7 +3433,6 @@ if (isset($_GET['action'])) {
         function designResetUndoStack() {
             designUndoStack = [];
             designRedoStack = [];
-            clearVisualGreenHistory();
             lastDesignSnapshot = getDesignBodyHtml();
             designCleanBodyHtml = lastDesignSnapshot; // save initial body for dirty comparison
             designCleanCode = editor ? editor.getValue() : null;
@@ -3130,10 +3848,70 @@ if (isset($_GET['action'])) {
             clearSasaDesignHighlight();
         }
 
+        // ── Markdown (text copiat de la AI) → HTML-ul site-ului ──
+        // **paragraf intreg**  → <p class="text_obisnuit2">…</p>
+        // paragraf normal      → <p class="text_obisnuit">…</p>
+        // **cuvinte** in text  → <span class="text_obisnuit2">…</span>
+        // *cuvinte* / _cuvinte_ → <em>…</em>   (***x*** → bold + italic)
+        // # Titlu → paragraf bold; > citat, `cod`, ~~taiat~~, [text](url), ---, "* item" sunt curatate/convertite.
+        function looksLikeMarkdown(text) {
+            return /\*\*\S[^\n]*?\*\*|__\S[^\n]*?__|(^|[^\w*\\])\*(?=\S)[^*\n]*?\S\*(?![\w*])|(^|[^\w\\])_(?=\S)[^_\n]*?\S_(?!\w)|^[ \t]{0,3}#{1,6}[ \t]+\S|^[ \t]{0,3}>[ \t]?\S|^[ \t]*[*+][ \t]+\S|~~\S[^\n]*?~~|`[^`\n]+`|\[[^\]\n]+\]\([^)\s]+\)/m.test(String(text || ''));
+        }
+        function markdownInlineToHtml(s) {
+            const escaped = [];
+            s = String(s).replace(/\\([\\`*_{}\[\]()#+\-.!~>])/g, function (m, c) {
+                escaped.push(c);
+                return '\u0001' + (escaped.length - 1) + '\u0001';
+            });
+            s = escapeHtml(s);
+            s = s.replace(/`([^`]+)`/g, '$1');
+            s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+[^)]*)?\)/g, function (m, label, url) {
+                return '<a href="' + url.replace(/"/g, '&quot;') + '">' + label + '</a>';
+            });
+            const boldItalic = '<span class="text_obisnuit2"><em>$1</em></span>';
+            s = s.replace(/\*\*\*(?=\S)(.*?\S)\*\*\*/g, boldItalic);
+            s = s.replace(/___(?=\S)(.*?\S)___/g, boldItalic);
+            s = s.replace(/\*\*(?=\S)(.*?\S)\*\*/g, '<span class="text_obisnuit2">$1</span>');
+            s = s.replace(/__(?=\S)(.*?\S)__/g, '<span class="text_obisnuit2">$1</span>');
+            s = s.replace(/(^|[^\w*])\*(?=\S)([^*]*?\S)\*(?![\w*])/g, '$1<em>$2</em>');
+            s = s.replace(/(^|[^\w])_(?=\S)([^_]*?\S)_(?!\w)/g, '$1<em>$2</em>');
+            s = s.replace(/~~(?=\S)(.*?\S)~~/g, '<s>$1</s>');
+            s = s.replace(/\u0001(\d+)\u0001/g, function (m, i) { return escapeHtml(escaped[+i]); });
+            return s;
+        }
+        // Fiecare rand ne-gol devine un paragraf: [{ cls, html }]
+        function markdownToParagraphBlocks(text) {
+            const blocks = [];
+            String(text || '').replace(/\r\n?/g, '\n').split('\n').forEach(function (raw) {
+                let line = raw.replace(/ /g, ' ').trim();
+                if (!line) return;
+                if (/^([-*_])(?:\s*\1){2,}$/.test(line)) return; // linie orizontala ---
+                let cls = 'text_obisnuit';
+                const heading = line.match(/^#{1,6}\s+(.*?)\s*#*$/);
+                if (heading) {
+                    line = heading[1].replace(/\*\*|__/g, '');
+                    cls = 'text_obisnuit2';
+                }
+                line = line.replace(/^(?:>\s?)+/, '').replace(/^[*+]\s+/, '- ').replace(/ {2,}/g, ' ').trim();
+                if (!line) return;
+                const whole = line.match(/^(\*\*|__)(?=\S)(.*\S)\1$/);
+                if (whole && whole[2].indexOf(whole[1]) === -1) {
+                    cls = 'text_obisnuit2';
+                    line = whole[2];
+                }
+                blocks.push({ cls: cls, html: markdownInlineToHtml(line) });
+            });
+            return blocks;
+        }
+
         // Wrap raw text in <p class="text_obisnuit">…</p> for SASA insert.
         // Each non-empty line becomes its own paragraph.
         function wrapTextForSasa(rawText) {
             if (!rawText) return '';
+            if (looksLikeMarkdown(rawText)) {
+                return markdownToParagraphBlocks(rawText)
+                    .map(b => '<p class="' + b.cls + '">' + b.html + '</p>').join('\n');
+            }
             const prefix = '<p class="text_obisnuit">';
             const suffix = '</p>';
             const lines = rawText.split(/\r?\n/).filter(l => l.trim().length > 0);
@@ -3303,6 +4081,8 @@ if (isset($_GET['action'])) {
                 browserUrl: BROWSER_DEFAULT_URL
             });
             tabs.push(tab);
+                    setTimeout(() => checkArticleIdentity(tab), 0);
+                    scheduleIndexOrderCheck();
             activeTabId = tab.id;
             // Show browser panel
             var splitContainer = document.getElementById('splitContainer');
@@ -3661,7 +4441,9 @@ if (isset($_GET['action'])) {
             const day = parseInt(dm[2], 10);
             const year = parseInt(dm[3], 10);
             if (!Number.isFinite(day) || !Number.isFinite(year) || day < 1 || day > 31 || year < 1900) return null;
-            const ms = new Date(year, monthIdx, day).getTime();
+            const date = new Date(year, monthIdx, day);
+            if (date.getFullYear() !== year || date.getMonth() !== monthIdx || date.getDate() !== day) return null;
+            const ms = date.getTime();
             return Number.isFinite(ms) ? ms : null;
         }
 
@@ -4236,7 +5018,7 @@ if (isset($_GET['action'])) {
                             editor.setValue(rep.html);
                             isSyncFromDesign = false;
                         }
-                        renderTabs();
+                        updateTabPresentation(t);
                     }
                 } catch (err) {
                     console.error(err);
@@ -4315,7 +5097,7 @@ if (isset($_GET['action'])) {
                             editor.setValue(merged.html);
                             isSyncFromDesign = false;
                         }
-                        renderTabs();
+                        updateTabPresentation(t);
                     }
                 } catch (e) {
                     console.error(e);
@@ -4368,7 +5150,7 @@ if (isset($_GET['action'])) {
 
         // Fără dubluri în index: același titlu+dată, același URL articol (link den_articol / linkMare), sau același HTML compresat.
         // Index-ul homepage primește automat doar articole mai noi decât ultimul/cel mai recent fragment deja listat.
-        function mergeCategoryBlockIntoIndex(indexHtml, blockHtml) {
+        function mergeCategoryBlockIntoIndex(indexHtml, blockHtml, options = {}) {
             const bounds = locateIndexCategorySectionBounds(indexHtml);
             if (!bounds.ok) return { ok: false, msg: bounds.msg };
             const blocks = enumerateIndexCategoryBlocks(indexHtml, bounds.divEndGlobal, bounds.regionEnd);
@@ -4421,7 +5203,7 @@ if (isset($_GET['action'])) {
             }
 
             const newestExistingTs = firstParsedIndexBlockTimestamp(blocks);
-            if (newestExistingTs !== null && (newTs === null || newTs <= newestExistingTs)) {
+            if (!options.explicitInsert && newestExistingTs !== null && (newTs === null || newTs <= newestExistingTs)) {
                 return {
                     ok: true,
                     html: indexHtml,
@@ -4436,8 +5218,513 @@ if (isset($_GET['action'])) {
                 ok: true,
                 html: ins.html,
                 action: 'insert',
-                msg: 'Articol adăugat în index (mai nou decât ultimul fragment).'
+                msg: 'Articol adăugat în index (ordonat după dată).'
             };
+        }
+
+        function suggestCalendarMonth(value) {
+            const input = String(value).trim().toLowerCase();
+            const months = [...Object.keys(RO_MONTH_TO_INDEX), ...Object.keys(EN_MONTH_TO_INDEX)];
+            let best = [], distance = Infinity;
+            for (const month of months) {
+                let row = Array.from({ length: month.length + 1 }, (_, i) => i);
+                for (let i = 1; i <= input.length; i++) {
+                    const next = [i];
+                    for (let j = 1; j <= month.length; j++) {
+                        next[j] = Math.min(next[j - 1] + 1, row[j] + 1, row[j - 1] + (input[i - 1] === month[j - 1] ? 0 : 1));
+                    }
+                    row = next;
+                }
+                const score = row[month.length];
+                if (score < distance) { best = [month]; distance = score; }
+                else if (score === distance) best.push(month);
+            }
+            return distance <= 2 && best.length === 1 ? best[0][0].toUpperCase() + best[0].slice(1) : '';
+        }
+
+        function validateIndexArticleDates(blocks) {
+            const errors = [];
+            for (const entry of blocks) {
+                const td = entry.block.match(/class\s*=\s*["']text_dreapta["'][^>]*>([\s\S]*?)<\/td>/i);
+                const plain = td ? td[1].replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ').replace(/\s+/g, ' ').trim() : '';
+                const match = plain.match(/\bOn\s+(.+?)\s+(\d{1,2}),?\s+(\d{4})\b/i);
+                if (!match) {
+                    errors.push({ file: entry.key, text: plain || '(dată lipsă)', reason: 'Format de dată nerecunoscut. Folosește: On Lună zi, an.', suggestion: '' });
+                    continue;
+                }
+                const month = monthIndexFromRoEnName(match[1]);
+                if (month === null) {
+                    const suggested = suggestCalendarMonth(match[1]);
+                    errors.push({ file: entry.key, text: match[0], reason: 'Lună scrisă greșit sau necunoscută: ' + match[1] + '.', suggestion: suggested ? 'On ' + suggested + ' ' + match[2] + ', ' + match[3] : '' });
+                } else if (parseCategoryArticleLineDate(entry.block) === null) {
+                    errors.push({ file: entry.key, text: match[0], reason: 'Dată calendaristică invalidă. Verifică ziua, anul și numărul de zile al lunii.', suggestion: '' });
+                }
+            }
+            return errors;
+        }
+
+        function correctMonthInDateCells(html, error) {
+            const original = error.text.match(/^On\s+(.+?)\s+(\d{1,2}),?\s+(\d{4})$/i);
+            const suggested = error.suggestion && error.suggestion.match(/^On\s+(.+?)\s+(\d{1,2}),?\s+(\d{4})$/i);
+            if (!original || !suggested) return { ok: false, html };
+            let found = false;
+            const result = html.replace(/(<td\b[^>]*class\s*=\s*["']text_dreapta["'][^>]*>)([\s\S]*?)(<\/td>)/gi, (all, open, inner, close) => {
+                const fixed = inner.replace(/\bOn\s+([^<>]+?)\s+(\d{1,2}),?\s+(\d{4})\b/gi, (date, month, day, year) => {
+                    if (Number(day) !== Number(original[2]) || year !== original[3]) return date;
+                    if (monthIndexFromRoEnName(month) === monthIndexFromRoEnName(suggested[1])) { found = true; return date; }
+                    if (month.toLowerCase() !== original[1].toLowerCase()) return date;
+                    found = true;
+                    return date.replace(month, suggested[1]);
+                });
+                return open + fixed + close;
+            });
+            return { ok: found, html: result };
+        }
+
+        async function correctLinkedIndexMonths(indexPath, html, errors, messages) {
+            const apiBase = window.location.pathname.replace(/[#?].*$/, '');
+            const read = async path => {
+                const data = await (await fetch(apiBase + '?action=load&file=' + encodeURIComponent(path), { cache: 'no-store' })).json();
+                if (!data.ok) throw new Error(data.error || 'Nu pot citi ' + path);
+                return data.content;
+            };
+            const write = async (path, before, after) => {
+                if (before === after) { messages.push(path + ' — luna este deja corectă.'); return; }
+                const tab = findTabByPath(path);
+                if (tab && (tab.isDirty || (tab.id === activeTabId && editor && normalizeHtmlForSyncCompare(editor.getValue()) !== normalizeHtmlForSyncCompare(tab.originalContent)))) throw new Error('Modificări nesalvate în ' + path);
+                if (await read(path) !== before) throw new Error('Fișier modificat între timp: ' + path);
+                const saved = await (await fetch(apiBase + '?action=save', { method: 'POST', body: new URLSearchParams({ file: path, content: after }) })).json();
+                if (!saved.ok) throw new Error(saved.error || 'Salvare eșuată: ' + path);
+                messages.push(path + ' — luna a fost corectată.');
+                if (tab && !tab.isDirty && (tab.id !== activeTabId || !editor || normalizeHtmlForSyncCompare(editor.getValue()) === normalizeHtmlForSyncCompare(before))) {
+                    tab.editorContent = tab.originalContent = after;
+                    tab.originalContentNorm = normalizeHtmlForCompare(after);
+                    if (tab.id === activeTabId && editor) {
+                        isSyncFromDesign = true;
+                        try { editor.setValue(after); } finally { isSyncFromDesign = false; }
+                        updatePreview();
+                    }
+                    updateTabPresentation(tab);
+                }
+            };
+            for (const error of errors) {
+                if (!error.suggestion) continue;
+                try {
+                    const bounds = locateIndexCategorySectionBounds(html);
+                    const block = enumerateIndexCategoryBlocks(html, bounds.divEndGlobal, bounds.regionEnd).find(b => b.key === error.file);
+                    if (!block) throw new Error('Intrarea nu mai există în index.');
+                    const category = block.block.match(/<a\b(?=[^>]*\brel\s*=\s*["'][^"']*category)[^>]*href\s*=\s*["']([^"']+)["']/i);
+                    if (!category) throw new Error('Nu am identificat categoria.');
+                    const filename = value => {
+                        const name = new URL(value, 'https://local.invalid/').pathname.split('/').pop();
+                        if (!/^[\w.-]+\.html?$/i.test(name)) throw new Error('Nume de fișier nerecunoscut.');
+                        return name;
+                    };
+                    const articlePath = categoryPathBesideArticle(indexPath, filename(error.file));
+                    const categoryPath = categoryPathBesideArticle(indexPath, filename(category[1]));
+                    const article = await read(articlePath), categoryHtml = await read(categoryPath);
+                    const articleFix = correctMonthInDateCells(article, error);
+                    const region = findCategoryListRegion(categoryHtml);
+                    if (!region.ok) throw new Error(region.msg);
+                    const matches = enumerateIndexCategoryBlocks(categoryHtml, region.divEndGlobal, region.regionEnd).filter(b => b.key === error.file);
+                    if (!matches.length) throw new Error('Articolul nu a fost găsit în categorie.');
+                    let categoryFixed = categoryHtml;
+                    for (const entry of matches.slice().reverse()) {
+                        const fixed = correctMonthInDateCells(entry.block, error);
+                        if (!fixed.ok) throw new Error('Data din categorie diferă; verifică manual.');
+                        categoryFixed = categoryFixed.slice(0, entry.start) + fixed.html + categoryFixed.slice(entry.end);
+                    }
+                    const indexFix = correctMonthInDateCells(block.block, error);
+                    if (!articleFix.ok || !indexFix.ok) throw new Error('Data articolului diferă; verifică manual.');
+                    await write(articlePath, article, articleFix.html);
+                    await write(categoryPath, categoryHtml, categoryFixed);
+                    html = html.slice(0, block.start) + indexFix.html + html.slice(block.end);
+                    messages.push(error.file + ': „' + error.text + '” → „' + error.suggestion + '”.');
+                } catch (errorInfo) {
+                    messages.push(error.file + ' — corectare incompletă: ' + errorInfo.message + ' Data din index rămâne pentru reverificare.');
+                }
+            }
+            return html;
+        }
+
+        function reorderIndexArticles(html) {
+            const bounds = locateIndexCategorySectionBounds(html);
+            if (!bounds.ok) return { ok: false, msg: bounds.msg };
+            const blocks = enumerateIndexCategoryBlocks(html, bounds.divEndGlobal, bounds.regionEnd);
+            const dated = blocks.map((b, i) => ({ ...b, position: i, date: parseCategoryArticleLineDate(b.block) })).filter(b => b.date !== null);
+            const sorted = dated.slice().sort((a, b) => b.date - a.date || a.position - b.position);
+            const changes = [];
+            let result = html;
+            // Replace only article blocks; preserve all surrounding HTML and undated entries.
+            for (let i = dated.length - 1; i >= 0; i--) {
+                const old = dated[i], replacement = sorted[i];
+                if (old.position === replacement.position) continue;
+                result = result.slice(0, old.start) + replacement.block + result.slice(old.end);
+                changes.unshift({ file: replacement.key, from: replacement.position + 1, to: old.position + 1, date: replacement.date });
+            }
+            return { ok: true, html: result, changes, dateErrors: validateIndexArticleDates(blocks) };
+        }
+
+        let indexOrderTimer = null;
+        let indexOrderRunning = false;
+        function scheduleIndexOrderCheck() {
+            clearTimeout(indexOrderTimer);
+            indexOrderTimer = setTimeout(checkIndexArticleOrder, 500);
+            scheduleRecentArticlesCheck();
+        }
+
+        // ── Verificare in fundal: cele mai noi 2 articole (dupa data din pagina, ro/ si en/)
+        //    exista in pagina lor de categorie si in index.html? Daca nu, apare un anunt.
+        //    Ruleaza la pornire, la deschiderea/inchiderea unei pagini, dupa Save, ADD-CAT si To-INDEX.
+        var RECENT_ARTICLES_TO_CHECK = 2;
+        var recentArticlesTimer = null, recentArticlesRunning = false, recentArticlesPending = false;
+        function scheduleRecentArticlesCheck(delay) {
+            clearTimeout(recentArticlesTimer);
+            recentArticlesTimer = setTimeout(checkRecentArticlesInLists, delay == null ? 1500 : delay);
+        }
+        async function recentArticlesLoad(path) {
+            const apiBase = window.location.pathname.replace(/[#?].*$/, '');
+            const d = await (await fetch(apiBase + '?action=load&file=' + encodeURIComponent(path), { cache: 'no-store' })).json();
+            if (!d.ok) throw new Error(d.error || ('Nu pot citi ' + path));
+            return d.content || '';
+        }
+        function recentArticlesListKeys(html) {
+            const r = findCategoryListRegion(html);
+            if (!r.ok) return null;
+            return enumerateIndexCategoryBlocks(html, r.divEndGlobal, r.regionEnd).map(function (b) { return b.key; });
+        }
+        function recentArticlesShortPath(p) {
+            return String(p || '').replace(/\\/g, '/').split('/').slice(-2).join('/');
+        }
+        async function checkRecentArticlesInLists() {
+            if (recentArticlesRunning) { recentArticlesPending = true; return; }
+            recentArticlesRunning = true;
+            const problems = [];
+            const apiBase = window.location.pathname.replace(/[#?].*$/, '');
+            try {
+                for (const idxPath of [TO_INDEX_RO_HTML_PATH, TO_INDEX_EN_HTML_PATH]) {
+                    const dir = idxPath.replace(/\/[^\/]*$/, '');
+                    let res = null;
+                    try {
+                        res = await (await fetch(apiBase + '?action=recentArticles&n=' + RECENT_ARTICLES_TO_CHECK +
+                            '&dir=' + encodeURIComponent(dir), { cache: 'no-store' })).json();
+                    } catch (e) { continue; }
+                    if (!res || !res.ok || !res.articles) continue;
+                    let idxKeys = null;
+                    try { idxKeys = recentArticlesListKeys(await recentArticlesLoad(idxPath)); } catch (e) { }
+                    for (const art of res.articles) {
+                        const item = { file: art.file, date: art.date, missing: [], note: '' };
+                        try {
+                            const built = buildCategoryBlockFromArticleHtml(await recentArticlesLoad(art.file));
+                            if (!built || !built.ok) {
+                                const tmp = document.createElement('textarea');
+                                tmp.innerHTML = (built && built.msg) || '';
+                                item.note = 'Nu pot construi fragmentul pentru liste: ' + tmp.value;
+                            } else {
+                                const key = normalizeArticleKeyFromBlock(built.block);
+                                const catPath = categoryPathBesideArticle(art.file, built.categoryFile);
+                                let catKeys = null;
+                                try { catKeys = recentArticlesListKeys(await recentArticlesLoad(catPath)); }
+                                catch (e) { item.note = 'Nu pot citi pagina de categorie ' + recentArticlesShortPath(catPath) + '.'; }
+                                if (catKeys && catKeys.indexOf(key) === -1) item.missing.push(recentArticlesShortPath(catPath));
+                                if (idxKeys && idxKeys.indexOf(key) === -1) item.missing.push(recentArticlesShortPath(idxPath));
+                            }
+                        } catch (e) {
+                            item.note = e.message;
+                        }
+                        if (item.missing.length || item.note) problems.push(item);
+                    }
+                }
+            } finally {
+                recentArticlesRunning = false;
+            }
+            showRecentArticlesNotice(problems);
+            if (recentArticlesPending) { recentArticlesPending = false; scheduleRecentArticlesCheck(500); }
+        }
+        function showRecentArticlesNotice(problems) {
+            let box = document.getElementById('recentArticlesNotice');
+            if (!problems.length) { if (box) box.remove(); return; }
+            if (!box) {
+                box = document.createElement('div');
+                box.id = 'recentArticlesNotice';
+                box.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:99990;max-width:520px;' +
+                    'background:#1f2937;border:2px solid #f59e0b;border-radius:10px;padding:14px 16px;color:#eee;' +
+                    'font-size:15px;line-height:1.45;box-shadow:0 10px 30px rgba(0,0,0,.55)';
+                document.body.appendChild(box);
+            }
+            box.replaceChildren();
+            const head = document.createElement('div');
+            head.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:8px';
+            head.innerHTML = '<i class="fas fa-exclamation-triangle" style="color:#f59e0b"></i>' +
+                '<b style="flex:1">Articole noi nepreluate în liste</b>';
+            const close = document.createElement('button');
+            close.className = 'btn btn-ghost';
+            close.textContent = '×';
+            close.title = 'Ascunde (reapare la următoarea verificare)';
+            close.style.cssText = 'padding:2px 10px;font-size:18px';
+            close.onclick = function () { box.remove(); };
+            head.appendChild(close);
+            box.appendChild(head);
+            problems.forEach(function (p) {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;gap:10px;align-items:flex-start;padding:6px 0;border-top:1px solid #374151';
+                const text = document.createElement('div');
+                text.style.flex = '1';
+                const title = document.createElement('div');
+                title.innerHTML = '<b></b> <span style="color:#9ca3af"></span>';
+                title.querySelector('b').textContent = recentArticlesShortPath(p.file);
+                title.querySelector('span').textContent = '(' + String(p.date || '').replace(/^On\s+/i, '') + ')';
+                text.appendChild(title);
+                const det = document.createElement('div');
+                det.style.color = '#fbbf24';
+                det.textContent = p.missing.length ? 'Lipsește din: ' + p.missing.join(', ') : p.note;
+                text.appendChild(det);
+                if (p.missing.length && p.note) {
+                    const n2 = document.createElement('div');
+                    n2.style.color = '#9ca3af';
+                    n2.textContent = p.note;
+                    text.appendChild(n2);
+                }
+                row.appendChild(text);
+                const open = document.createElement('button');
+                open.className = 'btn btn-primary';
+                open.textContent = 'Deschide';
+                open.style.cssText = 'padding:4px 12px;font-size:14px;white-space:nowrap';
+                open.onclick = function () { openFile(p.file); };
+                row.appendChild(open);
+                box.appendChild(row);
+            });
+            const hint = document.createElement('div');
+            hint.style.cssText = 'color:#9ca3af;font-size:13px;margin-top:6px';
+            hint.textContent = 'Deschide articolul și apasă ADD-CAT / To-INDEX (sau salvează-l).';
+            box.appendChild(hint);
+        }
+        document.addEventListener('click', function (e) {
+            const b = e.target && e.target.closest ? e.target.closest('#btnAddCat, #btnToIndex') : null;
+            if (b) scheduleRecentArticlesCheck(3000);
+        }, true);
+
+        function showIndexOrderReport(reports) {
+            let dialog = document.getElementById('indexOrderReport');
+            if (!dialog) {
+                dialog = document.createElement('dialog');
+                dialog.id = 'indexOrderReport';
+                dialog.style.cssText = 'max-width:620px;width:calc(100% - 48px);max-height:80vh;overflow:auto;padding:28px;border:1px solid #526080;border-radius:16px;background:#242735;color:#f1f3f9;box-shadow:0 20px 70px #0008;font:16px/1.6 system-ui';
+                dialog.setAttribute('aria-labelledby', 'indexOrderReportTitle');
+                dialog.innerHTML = '<h2 id="indexOrderReportTitle" style="margin-top:0">Verificarea articolelor din index</h2><div class="report"></div><form method="dialog"><button autofocus style="padding:10px 24px;background:#397ce8;color:white;border:0;border-radius:8px;font:inherit;cursor:pointer">Am înțeles</button></form>';
+                document.body.appendChild(dialog);
+            }
+            const container = dialog.querySelector('.report');
+            if (!dialog.open) container.replaceChildren();
+            for (const report of reports) {
+                const title = document.createElement('p');
+                title.textContent = report.path + (report.changes.length ? ' — ordinea datelor a fost corectată și salvată:' : ' — date de verificat:');
+                container.appendChild(title);
+                for (const text of (report.corrections || [])) {
+                    const detail = document.createElement('p');
+                    detail.textContent = text;
+                    container.appendChild(detail);
+                }
+                const list = document.createElement('ul');
+                for (const change of report.changes) {
+                    const item = document.createElement('li');
+                    const date = new Intl.DateTimeFormat('ro-RO', { day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(change.date));
+                    item.textContent = change.file + ' (' + date + '): poziția ' + change.from + ' → ' + change.to + '.';
+                    list.appendChild(item);
+                }
+                container.appendChild(list);
+                if (report.dateErrors && report.dateErrors.length) {
+                    const note = document.createElement('p');
+                    note.textContent = 'Datele de mai jos necesită corectare manuală. Articolele respective nu au fost mutate automat:';
+                    container.appendChild(note);
+                    const errors = document.createElement('ul');
+                    for (const error of report.dateErrors) {
+                        const item = document.createElement('li');
+                        item.textContent = error.file + ' — „' + error.text + '”. ' + error.reason + (error.suggestion ? ' Sugestie: „' + error.suggestion + '”.' : '');
+                        errors.appendChild(item);
+                    }
+                    container.appendChild(errors);
+                }
+            }
+            if (!dialog.open) dialog.showModal();
+        }
+
+        async function checkIndexArticleOrder() {
+            if (indexOrderRunning) { scheduleIndexOrderCheck(); return; }
+            indexOrderRunning = true;
+            const reports = [];
+            const apiBase = window.location.pathname.replace(/[#?].*$/, '');
+            try {
+                for (const path of [TO_INDEX_RO_HTML_PATH, TO_INDEX_EN_HTML_PATH]) {
+                    const hasEdits = () => {
+                        const tab = findTabByPath(path);
+                        return tab && (tab.isDirty || (tab.id === activeTabId && editor && normalizeHtmlForSyncCompare(editor.getValue()) !== normalizeHtmlForSyncCompare(tab.originalContent)));
+                    };
+                    if (hasEdits()) { toast('Verificare index amânată: salvează modificările din ' + path); continue; }
+                    const url = apiBase + '?action=load&file=' + encodeURIComponent(path);
+                    const data = await (await fetch(url, { cache: 'no-store' })).json();
+                    if (!data.ok) { toast('Verificare index: ' + (data.error || path)); continue; }
+                    let result = reorderIndexArticles(data.content);
+                    if (!result.ok) { toast('Verificare index: ' + result.msg); continue; }
+                    const report = { path, changes: [], dateErrors: result.dateErrors, corrections: [] };
+                    reports.push(report);
+                    const corrected = await correctLinkedIndexMonths(path, data.content, result.dateErrors, report.corrections);
+                    result = reorderIndexArticles(corrected);
+                    if (!result.changes.length && corrected === data.content) continue;
+                    // Re-read before saving so external edits made during the check are not overwritten.
+                    const latest = await (await fetch(url, { cache: 'no-store' })).json();
+                    if (!latest.ok || latest.content !== data.content || hasEdits()) { scheduleIndexOrderCheck(); continue; }
+                    const body = new URLSearchParams({ file: path, content: result.html });
+                    const saved = await (await fetch(apiBase + '?action=save', { method: 'POST', body })).json();
+                    if (!saved.ok) { toast('Indexul nu a putut fi reordonat: ' + (saved.error || path)); continue; }
+                    report.changes = result.changes;
+                    report.dateErrors = result.dateErrors;
+                    if (corrected !== data.content) report.corrections.push(path + ' — luna corectată și indexul salvat.');
+                    const tab = findTabByPath(path);
+                    if (tab && !hasEdits()) {
+                        tab.editorContent = tab.originalContent = result.html;
+                        tab.originalContentNorm = normalizeHtmlForCompare(result.html);
+                        if (tab.id === activeTabId && editor) {
+                            isSyncFromDesign = true;
+                            try { editor.setValue(result.html); } finally { isSyncFromDesign = false; }
+                            updatePreview();
+                        }
+                        updateTabPresentation(tab);
+                    }
+                }
+            } catch (error) {
+                console.error(error);
+                toast('Verificarea indexului nu a reușit: ' + error.message);
+            } finally {
+                indexOrderRunning = false;
+                const visibleReports = reports.filter(r => r.changes.length || r.dateErrors.length || r.corrections.length);
+                if (visibleReports.length) showIndexOrderReport(visibleReports);
+            }
+        }
+        window.addEventListener('load', scheduleIndexOrderCheck);
+
+        function articleIdentityIssues(source, path) {
+            const file = String(path || '').replace(/\\/g, '/').split('/').pop();
+            if (!/\.html?$/i.test(file || '')) return [];
+            const doc = new DOMParser().parseFromString(source, 'text/html');
+            const language = /\/en\//i.test(String(path).replace(/\\/g, '/')) ? 'en' : 'ro';
+            const expected = 'https://neculaifantanaru.com/' + (language === 'en' ? 'en/' : '') + file;
+            const issues = [];
+            const inspect = (label, value) => {
+                try {
+                    const url = new URL(value, expected);
+                    const target = decodeURIComponent(url.pathname.split('/').pop());
+                    if (url.pathname.toLowerCase() !== new URL(expected).pathname.toLowerCase()) issues.push({ label, value: url.href, target, expected });
+                } catch (_) { issues.push({ label, value, target: '', expected }); }
+            };
+            for (const canonical of doc.querySelectorAll('link[rel~="canonical"]')) inspect('Canonical', canonical.getAttribute('href') || '');
+            return issues;
+        }
+
+        function canonicalLocalPath(filePath, canonicalUrl) {
+            const url = new URL(canonicalUrl);
+            if (!/^(www\.)?neculaifantanaru\.com$/i.test(url.hostname)) return null;
+            const match = url.pathname.match(/^\/(en\/)?([^/]+\.html?)$/i);
+            if (!match) return null;
+            const file = decodeURIComponent(match[2]);
+            if (!/^[\w.-]+\.html?$/i.test(file)) return null;
+            const path = String(filePath).replace(/\\/g, '/');
+            const root = path.match(/^(.*)\/(?:ro|en)\/[^/]+$/i);
+            if (!root) return null;
+            return root[1] + '/' + (match[1] ? 'en' : 'ro') + '/' + file;
+        }
+
+        let identityDialogQueue = Promise.resolve();
+        async function checkArticleIdentity(tab, closing = false) {
+            if (!tab || tab.type === 'browser' || !tab.filePath) return true;
+            const source = tab.id === activeTabId && editor ? editor.getValue() : tab.editorContent;
+            const issues = articleIdentityIssues(source || '', tab.filePath);
+            if (!issues.length) return true;
+            const task = async () => {
+                if (!tabs.includes(tab)) return true;
+                const details = [];
+                for (const issue of issues) {
+                    let duplicate = '';
+                    if (/^[\w.-]+\.html?$/i.test(issue.target)) {
+                        try {
+                            const path = canonicalLocalPath(tab.filePath, issue.value);
+                            if (!path) throw new Error('Canonical fără corespondent local');
+                            const data = await (await fetch('?action=load&file=' + encodeURIComponent(path), { cache: 'no-store', signal: AbortSignal.timeout(5000) })).json();
+                            if (data.ok) {
+                                const other = new DOMParser().parseFromString(data.content, 'text/html');
+                                const canonical = other.querySelector('link[rel~="canonical"]');
+                                if (canonical && new URL(canonical.getAttribute('href'), issue.value).href === issue.value) duplicate = ' Mai există un fișier cu același canonical: ' + path + '.';
+                            }
+                        } catch (_) { /* The filename mismatch remains useful even when the other file cannot be read. */ }
+                    }
+                    details.push(issue.label + ': ' + issue.value + '.' + duplicate + ' Link așteptat: ' + issue.expected);
+                }
+                const current = tab.id === activeTabId && editor ? editor.getValue() : tab.editorContent;
+                if (!tabs.includes(tab)) return true;
+                const currentIssues = articleIdentityIssues(current || '', tab.filePath);
+                if (!currentIssues.length) return true;
+                if (JSON.stringify(currentIssues) !== JSON.stringify(issues)) {
+                    if (!closing) setTimeout(() => checkArticleIdentity(tab), 0);
+                    return false;
+                }
+                return new Promise(resolve => {
+                    const dialog = document.createElement('dialog');
+                    dialog.style.cssText = 'max-width:680px;width:calc(100% - 48px);padding:28px;border:1px solid #526080;border-radius:16px;background:#242735;color:#f1f3f9;font:16px/1.6 system-ui;overflow-wrap:anywhere';
+                    const heading = document.createElement('h2');
+                    heading.textContent = 'Verifică linkul canonical';
+                    dialog.appendChild(heading);
+                    const intro = document.createElement('p');
+                    intro.textContent = tab.filePath + ' conține linkuri care indică alt articol. Este posibil să fi rămas din fișierul copiat.';
+                    dialog.appendChild(intro);
+                    for (const text of details) { const p = document.createElement('p'); p.textContent = text; dialog.appendChild(p); }
+                    const finish = value => { dialog.close(); dialog.remove(); resolve(value); };
+                    const stay = document.createElement('button'); stay.textContent = 'Revin la editare'; stay.autofocus = true;
+                    stay.onclick = () => finish(false); dialog.appendChild(stay);
+                    if (closing) { const leave = document.createElement('button'); leave.textContent = 'Închid oricum'; leave.onclick = () => finish(true); dialog.appendChild(leave); }
+                    for (const button of dialog.querySelectorAll('button')) button.style.cssText = 'padding:10px 18px;margin:8px 12px 0 0;border:0;border-radius:8px;background:#397ce8;color:white;font:inherit;cursor:pointer';
+                    dialog.addEventListener('cancel', event => { event.preventDefault(); finish(false); });
+                    document.body.appendChild(dialog); dialog.showModal();
+                });
+            };
+            const result = identityDialogQueue.then(task, task);
+            identityDialogQueue = result.catch(() => true);
+            return result;
+        }
+
+        function newerIndexEntry(indexHtml, blockHtml) {
+            const bounds = locateIndexCategorySectionBounds(indexHtml);
+            if (!bounds.ok) return null;
+            const timestamp = parseCategoryArticleLineDate(blockHtml);
+            if (timestamp === null) return null;
+            const key = normalizeArticleKeyFromBlock(blockHtml);
+            let newest = null;
+            for (const entry of enumerateIndexCategoryBlocks(indexHtml, bounds.divEndGlobal, bounds.regionEnd)) {
+                const date = parseCategoryArticleLineDate(entry.block);
+                if (entry.key !== key && date !== null && date > timestamp && (!newest || date > newest.date)) {
+                    newest = { date, file: entry.key };
+                }
+            }
+            return newest;
+        }
+
+        function showIndexDateNotice(entry) {
+            let dialog = document.getElementById('indexDateNotice');
+            if (!dialog) {
+                const style = document.createElement('style');
+                style.textContent = '#indexDateNotice{max-width:520px;width:calc(100% - 64px);box-sizing:border-box;padding:28px;border:1px solid #46516d;border-radius:16px;background:#242735;color:#f1f3f9;box-shadow:0 20px 70px #0008;font:16px/1.6 system-ui}#indexDateNotice::backdrop{background:#10131caa}#indexDateNotice h3{margin:0 0 16px;font-size:21px}#indexDateNotice p{margin:12px 0;overflow-wrap:anywhere}#indexDateNotice strong{color:#9fc4ff}#indexDateNotice button{display:block;margin:24px 0 0 auto;padding:10px 24px;border:0;border-radius:8px;background:#397ce8;color:white;font:600 15px system-ui;cursor:pointer}#indexDateNotice button:focus-visible{outline:3px solid #b8d2ff;outline-offset:3px}';
+                document.head.appendChild(style);
+                dialog = document.createElement('dialog');
+                dialog.id = 'indexDateNotice';
+                dialog.setAttribute('aria-labelledby', 'indexDateNoticeTitle');
+                dialog.innerHTML = '<h3 id="indexDateNoticeTitle">Articol adăugat în index</h3><p class="date-message"></p><p>Articolul curent este în index, sub intrarea mai recentă, în ordinea datelor. Poți corecta ulterior data articolului precedent.</p><form method="dialog"><button autofocus>Am înțeles</button></form>';
+                document.body.appendChild(dialog);
+            }
+            const date = document.createElement('strong');
+            date.textContent = new Intl.DateTimeFormat('ro-RO', { day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(entry.date));
+            const file = document.createElement('strong');
+            file.textContent = entry.file;
+            dialog.querySelector('.date-message').replaceChildren(document.createTextNode('Există deja o intrare mai recentă datată '), date, document.createTextNode(', la articolul '), file, document.createTextNode('.'));
+            if (!dialog.open) dialog.showModal();
         }
 
         async function pushFirstCategoryBlockToIndex() {
@@ -4484,7 +5771,8 @@ if (isset($_GET['action'])) {
                     return;
                 }
                 const idx = data.content || '';
-                const merged = mergeCategoryBlockIntoIndex(idx, block);
+                const newerEntry = newerIndexEntry(idx, block);
+                const merged = mergeCategoryBlockIntoIndex(idx, block, { explicitInsert: true });
                 if (!merged.ok) {
                     toast(merged.msg);
                     return;
@@ -4503,6 +5791,7 @@ if (isset($_GET['action'])) {
                     return;
                 }
                 toast('To-INDEX: ' + merged.msg);
+                if (newerEntry) showIndexDateNotice(newerEntry);
             } catch (e) {
                 console.error(e);
                 toast('To-INDEX: ' + (e.message || String(e)));
@@ -4657,6 +5946,7 @@ if (isset($_GET['action'])) {
         let frCurrentMatches = [];
         let frCurrentIdx = -1;
         let frMarks = [];
+        let frDesignMatchCount = 0;
         let _frLastQuery = '';       // last search string used to build matches
         let _frLastCaseSens = false; // last Case Sensitive state
         let _frLastWholeWord = false; // last Whole Word state
@@ -4736,6 +6026,7 @@ if (isset($_GET['action'])) {
         function clearFindMarks() {
             frMarks.forEach(m => m.clear());
             frMarks = [];
+            frDesignMatchCount = 0;
             clearDesignFindHighlights();
         }
 
@@ -4756,13 +6047,13 @@ if (isset($_GET['action'])) {
         function highlightFindInDesign() {
             const iframe = document.getElementById('preview');
             const doc = iframe && iframe.contentDocument;
-            if (!doc || !doc.body) return;
-            if (viewMode !== 'design' && viewMode !== 'split') return;
+            if (!doc || !doc.body) return 0;
+            if (viewMode !== 'design' && viewMode !== 'split') return 0;
 
             clearDesignFindHighlights();
 
             const regex = buildSearchRegex();
-            if (!regex) return;
+            if (!regex) return 0;
 
             // Walk all text nodes in the design body and highlight matches
             const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, {
@@ -4809,6 +6100,7 @@ if (isset($_GET['action'])) {
                     parent.removeChild(node);
                 }
             });
+            return doc.querySelectorAll('mark[data-fr-highlight]').length;
         }
 
         /** Grup regex: un caracter RO indiferent dacă e scris cu sau fără diacritice (inclusiv ş/ţ vechi). */
@@ -4854,28 +6146,12 @@ if (isset($_GET['action'])) {
             }
             const src = editor.getValue();
 
-            // Determine search boundaries.
-            // In design scope, restrict to <!-- ARTICOL START --> … <!-- ARTICOL FINAL -->
-            let searchStart = 0;
-            let searchEnd = src.length;
+            // Design search covers every text node visible in the preview.
             const designScoped = _isFindDesignScoped();
             _frLastDesignScope = designScoped;
 
-            if (designScoped) {
-                const artStartMatch = src.indexOf('<!-- ARTICOL START -->');
-                const artEndMatch = src.indexOf('<!-- ARTICOL FINAL -->');
-                if (artStartMatch !== -1 && artEndMatch !== -1 && artEndMatch > artStartMatch) {
-                    searchStart = artStartMatch + '<!-- ARTICOL START -->'.length;
-                    searchEnd = artEndMatch;
-                }
-            }
-
             let m;
             while ((m = regex.exec(src)) !== null) {
-                // Skip matches outside the search boundaries
-                if (m.index < searchStart) continue;
-                if (m.index + m[0].length > searchEnd) break;
-
                 const from = editor.posFromIndex(m.index);
                 const to = editor.posFromIndex(m.index + m[0].length);
                 frCurrentMatches.push({ from, to, index: m.index, length: m[0].length });
@@ -4885,9 +6161,15 @@ if (isset($_GET['action'])) {
                 });
                 frMarks.push(mark);
             }
-            document.getElementById('frInfo').textContent = frCurrentMatches.length + ' rezultate gasite';
-            // Also highlight matches in the Design panel
-            highlightFindInDesign();
+            frDesignMatchCount = highlightFindInDesign();
+            const resultCount = designScoped ? frDesignMatchCount : frCurrentMatches.length;
+            document.getElementById('frInfo').textContent = resultCount === 1
+                ? '1 rezultat gasit'
+                : resultCount + ' rezultate gasite';
+        }
+
+        function getFindResultCount() {
+            return _isFindDesignScoped() ? frDesignMatchCount : frCurrentMatches.length;
         }
 
         // Rebuild match list only when query or options changed since last search.
@@ -4897,7 +6179,7 @@ if (isset($_GET['action'])) {
             const ww = document.getElementById('frWholeWord').checked;
             const ds = _isFindDesignScoped();
             if (q === _frLastQuery && cs === _frLastCaseSens && ww === _frLastWholeWord
-                && ds === _frLastDesignScope && frCurrentMatches.length > 0) {
+                && ds === _frLastDesignScope && getFindResultCount() > 0) {
                 return; // matches are still valid
             }
             _frLastQuery = q;
@@ -4924,30 +6206,33 @@ if (isset($_GET['action'])) {
 
         function findNext() {
             _ensureFindMatches();
-            if (frCurrentMatches.length === 0) {
+            const resultCount = getFindResultCount();
+            if (resultCount === 0) {
                 document.getElementById('frInfo').textContent = 'Niciun rezultat';
                 return;
             }
-            frCurrentIdx = (frCurrentIdx + 1) % frCurrentMatches.length;
+            frCurrentIdx = (frCurrentIdx + 1) % resultCount;
             goToMatch(frCurrentIdx);
         }
 
         function findPrev() {
             _ensureFindMatches();
-            if (frCurrentMatches.length === 0) {
+            const resultCount = getFindResultCount();
+            if (resultCount === 0) {
                 document.getElementById('frInfo').textContent = 'Niciun rezultat';
                 return;
             }
-            frCurrentIdx = (frCurrentIdx - 1 + frCurrentMatches.length) % frCurrentMatches.length;
+            frCurrentIdx = (frCurrentIdx - 1 + resultCount) % resultCount;
             goToMatch(frCurrentIdx);
         }
 
         function goToMatch(idx) {
             const match = frCurrentMatches[idx];
-            if (!match) return;
-            editor.setSelection(match.from, match.to);
-            editor.scrollIntoView({ from: match.from, to: match.to }, 80);
-            editor.focus();
+            if (match) {
+                editor.setSelection(match.from, match.to);
+                editor.scrollIntoView({ from: match.from, to: match.to }, 80);
+                if (viewMode === 'code') editor.focus();
+            }
             // Scroll to the active match in Design panel and highlight it
             try {
                 if (viewMode === 'design' || viewMode === 'split') {
@@ -4956,8 +6241,9 @@ if (isset($_GET['action'])) {
             } catch (e) {
                 // daca apare vreo eroare, nu blocam cautarea in cod
             }
+            const resultCount = getFindResultCount();
             document.getElementById('frInfo').textContent =
-                'Rezultat ' + (idx + 1) + ' din ' + frCurrentMatches.length;
+                'Rezultat ' + (idx + 1) + ' din ' + resultCount;
         }
 
         function scrollToDesignMatch(idx) {
@@ -4976,9 +6262,20 @@ if (isset($_GET['action'])) {
             // but usually they correspond, so we use min(idx, marks.length-1)
             const activeIdx = Math.min(idx, marks.length - 1);
             if (marks[activeIdx]) {
-                marks[activeIdx].style.background = 'rgba(255, 140, 0, 0.8)';
-                marks[activeIdx].style.outline = '2px solid #f59e0b';
-                marks[activeIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+                const activeMark = marks[activeIdx];
+                activeMark.style.background = 'rgba(255, 140, 0, 0.8)';
+                activeMark.style.outline = '2px solid #f59e0b';
+                activeMark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+                const win = iframe.contentWindow;
+                const selection = win && win.getSelection ? win.getSelection() : null;
+                if (selection) {
+                    const range = doc.createRange();
+                    range.selectNodeContents(activeMark);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    rememberDesignSelectionRange(win, doc);
+                }
             }
         }
 
@@ -5086,6 +6383,13 @@ if (isset($_GET['action'])) {
                 tabSize: 4
             });
             window.editor = editor;
+            // CodeMirror may scroll the outer page to reveal its cursor, even while
+            // hidden in Design. Background synchronization must not move the viewport.
+            editor.on('scrollCursorIntoView', (cm, event) => {
+                if (viewMode === 'design' || isSyncFromDesign || isSelectionFromDesign) {
+                    event.preventDefault();
+                }
+            });
             editor.setSize('100%', '100%');
             // Diacritice românești în editorul de cod
             editor.addKeyMap({
@@ -5101,16 +6405,6 @@ if (isset($_GET['action'])) {
                 'Alt-S': cm => { cm.replaceSelection('Ș'); },
                 'Alt-I': cm => { cm.replaceSelection('Î'); },
                 'Alt-A': cm => { cm.replaceSelection('â'); },
-            });
-
-            editor.on('keydown', (cm, e) => {
-                if (e.ctrlKey || e.metaKey || e.altKey || !(e.key === 'v' || e.key === 'V')) return;
-                if (!cm.somethingSelected || !cm.somethingSelected()) return;
-                e.preventDefault();
-                e.stopPropagation();
-                if (!applyLocalVisualGreenFromCodeSelection()) {
-                    showToast('Selectia din cod nu a putut fi marcata verde in Design', 'warning');
-                }
             });
 
             // ── Paste into empty / selected <p> blocks (code editor) ──
@@ -5160,9 +6454,59 @@ if (isset($_GET['action'])) {
                     const m = html.slice(idx).match(/^\s*<p\s+class\s*=\s*["']text_obisnuit["']\s*>\s*<\/p>/i);
                     return m ? m[0].length : 0;
                 }
+                function htmlToPlainTextForCompare(html) {
+                    const tmp = document.createElement('div');
+                    tmp.innerHTML = String(html || '').replace(/<br\s*\/?>/gi, '\n');
+                    return (tmp.textContent || tmp.innerText || '').replace(/\u00a0/g, ' ');
+                }
+                function normalizeTextForCompare(value) {
+                    return String(value || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+                }
+                function replaceFullSpanTextObisnuitSelection() {
+                    if (fromIdx >= toIdx) return false;
+                    const rawMulti = clipToPlainMultiline(change.text);
+                    const parts = normalizeParagraphChunks(rawMulti, 1);
+                    if (!parts.length) return false;
+                    const selectedPlain = normalizeTextForCompare(htmlToPlainTextForCompare(src.slice(fromIdx, toIdx)));
+                    if (!selectedPlain) return false;
+                    const fullSpanRe = /(<p\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit\b[^"']*["'][^>]*>)(\s*<span\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit2\b[^"']*["'][^>]*>)([\s\S]*?)(<\/span>\s*<\/p>)/gi;
+                    let m;
+                    while ((m = fullSpanRe.exec(src)) !== null) {
+                        const pStart = m.index;
+                        const pEnd = m.index + m[0].length;
+                        const innerStart = m.index + m[1].length + m[2].length;
+                        const innerEnd = innerStart + m[3].length;
+                        const selectionWithinParagraph = fromIdx >= pStart && toIdx <= pEnd;
+                        const selectionCoversInner = fromIdx <= innerStart && toIdx >= innerEnd;
+                        const selectionInsideInner = fromIdx >= innerStart && toIdx <= innerEnd;
+                        if (!selectionWithinParagraph && !selectionCoversInner && !selectionInsideInner) continue;
+                        if (selectedPlain !== normalizeTextForCompare(htmlToPlainTextForCompare(m[3]))) continue;
+                        const lineStart = src.lastIndexOf('\n', pStart - 1) + 1;
+                        const indent = (src.slice(lineStart, pStart).match(/^\s*/) || [''])[0];
+                        let replacement;
+                        if (parts.length === 1) {
+                            replacement = m[1] + escapeHtmlText(parts[0]) + '</p>';
+                        } else {
+                            replacement = parts.map(function (part, idx) {
+                                const pOpen = idx === 0 ? m[1] : '<p class="text_obisnuit">';
+                                return (idx === 0 ? '' : indent) + pOpen + escapeHtmlText(part) + '</p>';
+                            }).join('\n');
+                        }
+                        change.cancel();
+                        cm.operation(function () {
+                            cm.replaceRange(replacement, cm.posFromIndex(pStart), cm.posFromIndex(pEnd));
+                            cm.setCursor(cm.posFromIndex(pStart + replacement.length));
+                        });
+                        return true;
+                    }
+                    return false;
+                }
 
                 // Non-empty selection that looks like one or more <p>…</p> → replace with plain text_obisnuit blocks only.
                 if (fromIdx < toIdx) {
+                    if (replaceFullSpanTextObisnuitSelection()) {
+                        return true;
+                    }
                     const sel = src.slice(fromIdx, toIdx);
                     const nPOpen = (sel.match(/<p\b/gi) || []).length;
                     const nPClose = (sel.match(/<\/p>/gi) || []).length;
@@ -5313,6 +6657,7 @@ if (isset($_GET['action'])) {
                         }
                     }
                 }
+                if (!_isRestoringTab) scheduleLiveH1TitleSync();
                 if (isSyncFromDesign) return;
                 if (isApplyingUndoRedo) return;
                 // Collapse multiple consecutive spaces in code (preserve leading indentation).
@@ -5548,13 +6893,6 @@ if (isset($_GET['action'])) {
                 const activeEl = document.activeElement;
                 const activeTag = activeEl && activeEl.tagName ? activeEl.tagName.toLowerCase() : '';
                 const isPlainInput = activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select';
-                if (!isPlainInput && !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'v' || e.key === 'V')) {
-                    if (applyVisualGreenShortcut()) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        return;
-                    }
-                }
                 if ((e.ctrlKey || e.metaKey) && !isPlainInput &&
                     (e.key === 'z' || e.key === 'Z') && !e.shiftKey) {
                     e.preventDefault();
@@ -5815,6 +7153,73 @@ if (isset($_GET['action'])) {
             });
         }
 
+        // Butonul NEW din fereastra de start: deschide pagina model si afiseaza un memento.
+        // Template-ul nu se salveaza niciodata peste el: la Save, pagina se scrie intr-un fisier nou
+        // numit dupa CANONICAL (ex. .../bebe-new-go.html -> bebe-new-go.html), iar model-new.html ramane neatins.
+        // Fara extensie intentionat: daca ajunge din greseala pe server, nu e servit ca pagina .html.
+        var NEW_MODEL_PATH = 'e:/Carte/BB/17 - Site Leadership/Principal/ro/model-new';
+        function normTplPath(p) { return String(p || '').replace(/\\/g, '/').replace(/\/+/g, '/').toLowerCase(); }
+        function isTemplatePath(p) { return !!p && normTplPath(p) === normTplPath(NEW_MODEL_PATH); }
+        async function openNewFromModel() {
+            await openFile(NEW_MODEL_PATH);
+            if (isTemplatePath(currentFile)) showModelReminder();
+        }
+        async function resolveTemplateSaveTarget(html) {
+            var tplName = NEW_MODEL_PATH.split('/').pop();
+            var link = String(html || '').match(/<link\b[^>]*\brel\s*=\s*["']canonical["'][^>]*>/i);
+            var href = link ? (link[0].match(/\bhref\s*=\s*["']([^"']*)["']/i) || [])[1] : '';
+            var name = '';
+            if (href) {
+                name = href.split('#')[0].split('?')[0].replace(/\/+$/, '').split('/').pop() || '';
+                try { name = decodeURIComponent(name); } catch (e) { }
+            }
+            var tplBase = tplName.replace(/\.html?$/i, '').toLowerCase();
+            if (!name || !/\.html?$/i.test(name) || name.replace(/\.html?$/i, '').toLowerCase() === tplBase) {
+                showErrorPopup(
+                    'Acesta este TEMPLATE-ul (' + tplName + ') si nu poate fi salvat peste el.\n\n' +
+                    'Schimba mai intai CANONICAL LINK, de exemplu:\n' +
+                    '<link rel="canonical" href="https://neculaifantanaru.com/pagina-noua.html" />\n\n' +
+                    'La Save, pagina se va salva ca fisier nou cu numele din canonical.');
+                return null;
+            }
+            var dir = NEW_MODEL_PATH.replace(/\/[^\/]*$/, '');
+            var input = window.prompt(
+                'Pagina noua (din template) va fi salvata ca:\n' +
+                '(poti schimba folderul daca vrei)', dir + '/' + name);
+            if (input === null) { toast('Salvare anulata'); return null; }
+            input = input.trim().replace(/\\/g, '/');
+            if (!input) { toast('Salvare anulata'); return null; }
+            if (isTemplatePath(input)) {
+                showErrorPopup('Nu poti salva peste template-ul ' + tplName + '. Alege alt nume.');
+                return null;
+            }
+            try {
+                var chk = await (await fetch('?action=load&file=' + encodeURIComponent(input))).json();
+                if (chk && chk.ok && !window.confirm('Fisierul exista deja:\n' + input + '\n\nIl suprascrii?')) {
+                    toast('Salvare anulata');
+                    return null;
+                }
+            } catch (eChk) { }
+            return input;
+        }
+        function showModelReminder() {
+            var old = document.getElementById('modelReminderPopup');
+            if (old) old.remove();
+            var box = document.createElement('div');
+            box.id = 'modelReminderPopup';
+            box.style.cssText = 'position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45)';
+            box.innerHTML =
+                '<div style="background:#1f2937;border:2px solid #facc15;border-radius:10px;padding:24px 32px;max-width:520px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.6)">' +
+                '<div style="font-size:22px;font-weight:700;color:#facc15;margin-bottom:10px"><i class="fas fa-exclamation-triangle"></i> Atentie</div>' +
+                '<div style="font-size:18px;color:#eee;margin-bottom:20px">Schimba <b>TITLUL</b> si <b>CANONICAL LINK</b></div>' +
+                '<button class="btn btn-primary" style="font-size:16px;padding:8px 28px">OK</button></div>';
+            box.addEventListener('click', function (e) {
+                if (e.target === box || e.target.tagName === 'BUTTON') box.remove();
+            });
+            document.body.appendChild(box);
+            box.querySelector('button').focus();
+        }
+
         async function openFile(path, el) {
             // Check if file is already open in a tab
             var existing = findTabByPath(path);
@@ -5857,6 +7262,8 @@ if (isset($_GET['action'])) {
                     lastPreviewHadBody: /<body\b/i.test(data.content)
                 });
                 tabs.push(tab);
+                    setTimeout(() => checkArticleIdentity(tab), 0);
+                    scheduleIndexOrderCheck();
                 activeTabId = tab.id;
 
                 currentFile = data.file;
@@ -5877,7 +7284,6 @@ if (isset($_GET['action'])) {
                 isDirty = false;
                 designUndoStack = [];
                 designRedoStack = [];
-                clearVisualGreenHistory();
                 lastDesignSnapshot = null;
 
                 setViewMode('design');
@@ -5917,23 +7323,86 @@ if (isset($_GET['action'])) {
                 }
                 currentFile = trimmed;
             }
+            var savedFromTemplate = null, templateWritten = false;
+            if (isTemplatePath(currentFile)) {
+                var tplTarget = await resolveTemplateSaveTarget(editor.getValue());
+                if (!tplTarget) return;
+                savedFromTemplate = currentFile;
+                currentFile = tplTarget;
+            }
             try {
                 var rawContent = editor.getValue();
                 var contentToSave = rawContent;
-                if (isCurrentFileHtml() && typeof isArticlePageForSasaMetaSync === 'function' &&
-                    isArticlePageForSasaMetaSync(rawContent) && typeof applySasaTeaserToMetaDescription === 'function') {
-                    contentToSave = applySasaTeaserToMetaDescription(rawContent);
+                if (isCurrentFileHtml() && typeof removePasteWhitespaceNormalSpansFromHtml === 'function') {
+                    contentToSave = removePasteWhitespaceNormalSpansFromHtml(contentToSave);
+                }
+                if (isCurrentFileHtml() && typeof removeOrphanClosingSpansFromParagraphs === 'function') {
+                    contentToSave = removeOrphanClosingSpansFromParagraphs(contentToSave);
+                }
+                if (isCurrentFileHtml() && typeof normalizeTextParagraphInlineFormatting === 'function') {
+                    contentToSave = normalizeTextParagraphInlineFormatting(contentToSave);
+                }
+                if (isCurrentFileHtml() && typeof joinSasaParagraphClosingTags === 'function') {
+                    contentToSave = joinSasaParagraphClosingTags(contentToSave);
+                }
+                if (isCurrentFileHtml() && typeof applySasaTeaserToMetaDescription === 'function') {
+                    contentToSave = applySasaTeaserToMetaDescription(contentToSave);
+                }
+                if (isCurrentFileHtml() && typeof applyH1ToPageTitles === 'function') {
+                    contentToSave = applyH1ToPageTitles(contentToSave);
+                }
+                var protectedTail = null;
+                if (activeTabId) {
+                    for (var _sti = 0; _sti < tabs.length; _sti++) {
+                        if (tabs[_sti].id === activeTabId) {
+                            protectedTail = tabs[_sti].protectedBodyScriptTail;
+                            break;
+                        }
+                    }
+                }
+                if (protectedTail && typeof applyProtectedScriptsToFullHtml === 'function') {
+                    contentToSave = applyProtectedScriptsToFullHtml(contentToSave, protectedTail);
                 }
                 const body = new URLSearchParams();
                 body.append('file', currentFile);
                 body.append('content', contentToSave);
                 const res = await fetch('?action=save', { method: 'POST', body });
                 const data = await res.json();
-                if (!data.ok) { toast('Eroare la salvare: ' + data.error); return; }
+                if (!data.ok) {
+                    if (savedFromTemplate) currentFile = savedFromTemplate;
+                    toast('Eroare la salvare: ' + data.error);
+                    return;
+                }
+                if (savedFromTemplate) { templateWritten = true; addToRecentFiles(currentFile); }
+                // Dacă doar serverul a sincronizat meta (client vechi / cache), reîncarcă fișierul salvat
+                if (data.metaSynced && contentToSave === rawContent && data.file) {
+                    try {
+                        const resReload = await fetch('?action=load&file=' + encodeURIComponent(data.file));
+                        const reloadData = await resReload.json();
+                        if (reloadData.ok && reloadData.content) {
+                            contentToSave = reloadData.content;
+                        }
+                    } catch (eReload) { /* păstrăm contentToSave */ }
+                }
                 if (contentToSave !== rawContent) {
+                    const codeScroll = editor.getScrollInfo();
+                    const codeSelections = editor.listSelections();
+                    const wasSyncFromDesign = isSyncFromDesign;
                     isSyncFromDesign = true;
-                    editor.setValue(contentToSave);
-                    isSyncFromDesign = false;
+                    try {
+                        editor.operation(() => {
+                            editor.setValue(contentToSave);
+                            editor.setSelections(codeSelections, undefined, { scroll: false });
+                            editor.scrollTo(codeScroll.left, codeScroll.top);
+                        });
+                    } finally {
+                        isSyncFromDesign = wasSyncFromDesign;
+                    }
+                    // Save-time normalization updates the source only. Keep the live Design
+                    // DOM, selection and scroll intact; the clean baseline is recorded below.
+                }
+                if (data.metaSynced || contentToSave !== rawContent) {
+                    toast('Meta description și titluri pagină actualizate din articol (SASA-1 / H1).');
                 }
                 isDirty = false;
                 if (activeTabId) {
@@ -5942,20 +7411,20 @@ if (isset($_GET['action'])) {
                     if (tab) {
                         tab.isDirty = false;
                         tab.filePath = currentFile;
+                        tab.fileName = shortName(currentFile);
                         tab.originalContent = contentToSave;
                         tab.originalContentNorm = normalizeHtmlForCompare(tab.originalContent);
                         tab.editorContent = tab.originalContent;
+                        var _newTail = extractProtectedBodyScriptTail(contentToSave);
+                        if (_newTail) tab.protectedBodyScriptTail = _newTail;
                         lastDesignSnapshot = getDesignBodyHtml();
                         tab.lastDesignSnapshot = lastDesignSnapshot;
-                        var hasDesignHistoryAtSave = (designUndoStack && designUndoStack.length > 0) ||
-                            (designRedoStack && designRedoStack.length > 0);
-                        if (!hasDesignHistoryAtSave) {
-                            tab.designCleanCode = contentToSave;
-                            designCleanCode = contentToSave;
-                            designCleanBodyHtml = lastDesignSnapshot;
-                        } else {
-                            tab.designCleanCode = designCleanCode;
-                        }
+                        // Save always establishes a new clean baseline. Keep the undo/redo
+                        // history, but compare future Design syncs with what was just saved,
+                        // not with the version that was clean before the edit.
+                        designCleanCode = contentToSave;
+                        designCleanBodyHtml = lastDesignSnapshot;
+                        tab.designCleanCode = designCleanCode;
                         tab.designCleanBodyHtml = designCleanBodyHtml;
                         tab.designUndoStack = designUndoStack.slice();
                         tab.designRedoStack = designRedoStack.slice();
@@ -5970,19 +7439,22 @@ if (isset($_GET['action'])) {
                             await syncArticleBlockToCategoryAndIndexAfterSave(currentFile, tab.originalContent);
                         }
                         tab.categorySyncDescriptionBaseline = getCategorySyncDescriptionFromArticleHtml(tab.originalContent);
-                        renderTabs();
+                        updateTabPresentation(tab);
                     }
                 }
                 // Silent save: NO preview reload — avoids page flicker
                 // Preview is already up-to-date (changes are synced live)
                 toast('Salvat!');
+                scheduleRecentArticlesCheck(2500);
             } catch (e) {
+                if (savedFromTemplate && !templateWritten) currentFile = savedFromTemplate;
                 toast('Eroare la salvare');
             }
         }
 
         function isCurrentFileHtml() {
             if (!currentFile) return true;
+            if (isTemplatePath(currentFile)) return true; // template-ul NEW e HTML, desi n-are extensie
             const n = currentFile.toLowerCase();
             return n.endsWith('.html') || n.endsWith('.htm');
         }
@@ -5992,7 +7464,7 @@ if (isset($_GET['action'])) {
         // Compares old body HTML (from code editor) with new innerHTML (from design
         // panel) and restores the original tag variant wherever the browser swapped it.
         function preserveEquivTags(oldBodyContent, newBodyContent) {
-            var EQUIV = {'i':'em','em':'i','b':'strong','strong':'b'};
+            var EQUIV = {'b':'strong','strong':'b'};
             // Extract all tags with their positions
             function extractTags(html) {
                 var result = [];
@@ -6149,6 +7621,174 @@ if (isset($_GET['action'])) {
             return out;
         }
 
+        // Fix invalid markup produced when a block paragraph gets wrapped in a span
+        // instead of having its class changed: <span class="text_obisnuit2"><p class="text_obisnuit">…</p></span>
+        // → <p class="text_obisnuit2">…</p>
+        function normalizeSpanWrappedParagraphClass(html) {
+            return String(html || '').replace(
+                /<span\b[^>]*\bclass\s*=\s*["']([^"']+)["'][^>]*>\s*<p\b([^>]*)>([\s\S]*?)<\/p>\s*<\/span>/gi,
+                function (match, spanClass, pAttrs, inner) {
+                    var mainClass = String(spanClass || '').trim().split(/\s+/)[0];
+                    if (!mainClass) return match;
+                    if (typeof cssClasses !== 'undefined' && cssClasses.length && cssClasses.indexOf(mainClass) === -1) {
+                        return match;
+                    }
+                    var newAttrs = String(pAttrs || '');
+                    if (/\bclass\s*=/i.test(newAttrs)) {
+                        newAttrs = newAttrs.replace(/\bclass\s*=\s*["'][^"']*["']/i, 'class="' + mainClass + '"');
+                    } else {
+                        newAttrs = ' class="' + mainClass + '"' + newAttrs;
+                    }
+                    return '<p' + newAttrs + '>' + inner + '</p>';
+                }
+            );
+        }
+
+        function removeOrphanClosingSpansFromParagraphs(html) {
+            return String(html || '').replace(
+                /(<p\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit2?\b[^"']*["'][^>]*>)([\s\S]*?)(<\/p>)/gi,
+                function (_match, pOpen, inner, pClose) {
+                    let depth = 0;
+                    inner = String(inner || '').replace(/<\/?span\b[^>]*>/gi, function (tag) {
+                        if (/^<\s*span\b/i.test(tag)) {
+                            depth++;
+                            return tag;
+                        }
+                        if (depth > 0) {
+                            depth--;
+                            return tag;
+                        }
+                        return '';
+                    });
+                    return pOpen + inner + pClose;
+                }
+            );
+        }
+
+        function isPasteWhitespaceNormalStyle(styleValue) {
+            var cleaned = String(styleValue || '')
+                .replace(/\/\*[\s\S]*?\*\//g, '')
+                .replace(/\s+/g, ' ')
+                .replace(/\s*:\s*/g, ':')
+                .replace(/\s*;\s*/g, ';')
+                .replace(/;$/g, '')
+                .trim()
+                .toLowerCase();
+            return cleaned === 'white-space:normal';
+        }
+
+        function removePasteWhitespaceNormalSpansFromHtml(html) {
+            var out = String(html || '');
+            var before;
+            do {
+                before = out;
+                out = out.replace(/<span\b([^>]*)>([\s\S]*?)<\/span>/gi, function (match, attrs, inner) {
+                    attrs = String(attrs || '');
+                    var styleMatch = /\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(attrs);
+                    if (!styleMatch) return match;
+                    var styleValue = styleMatch[1] || styleMatch[2] || styleMatch[3] || '';
+                    var restAttrs = attrs.replace(/\s*\bstyle\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/i, '').trim();
+                    if (restAttrs || !isPasteWhitespaceNormalStyle(styleValue)) return match;
+                    return inner;
+                });
+            } while (out !== before);
+            return out;
+        }
+
+        function removePasteWhitespaceNormalSpansFromDom(root) {
+            if (!root || !root.querySelectorAll) return false;
+            var changed = false;
+            Array.prototype.slice.call(root.querySelectorAll('span[style]')).forEach(function (span) {
+                var attrs = Array.prototype.slice.call(span.attributes || []);
+                var nonStyleAttrs = attrs.filter(function (attr) {
+                    return String(attr.name || '').toLowerCase() !== 'style';
+                });
+                if (nonStyleAttrs.length || !isPasteWhitespaceNormalStyle(span.getAttribute('style'))) return;
+                var parent = span.parentNode;
+                if (!parent) return;
+                while (span.firstChild) parent.insertBefore(span.firstChild, span);
+                parent.removeChild(span);
+                parent.normalize();
+                changed = true;
+            });
+            return changed;
+        }
+
+        function normalizeFullTextObisnuit2SpanParagraphs(html) {
+            html = removeOrphanClosingSpansFromParagraphs(html);
+            return String(html || '').replace(
+                /(<p\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit\b[^"']*["'][^>]*>)\s*<span\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit2\b[^"']*["'][^>]*>([\s\S]*?)<\/span>\s*(<\/p>)/gi,
+                function (_match, pOpen, inner, pClose) {
+                    return pOpen + inner + pClose;
+                }
+            );
+        }
+
+        function normalizeTextParagraphInlineFormatting(html) {
+            var out = String(html || '').replace(
+                /(<p\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit2?\b[^"']*["'][^>]*>)([\s\S]*?)(<\/p>)/gi,
+                function (_match, pOpen, inner, pClose) {
+                    var depths = {};
+                    inner = String(inner || '').replace(/<i\s*>/gi, '<em>').replace(/<\/i>/gi, '</em>');
+                    inner = inner.replace(/<\/?(em|strong|u)\b[^>]*>/gi, function (tag, name) {
+                        name = String(name || '').toLowerCase();
+                        depths[name] = depths[name] || 0;
+                        if (new RegExp('^<\\s*' + name + '\\b', 'i').test(tag)) {
+                            depths[name]++;
+                            return tag;
+                        }
+                        if (depths[name] > 0) {
+                            depths[name]--;
+                            return tag;
+                        }
+                        return '';
+                    });
+                    var before;
+                    do {
+                        before = inner;
+                        inner = inner
+                            .replace(/<(em|strong|u)\b[^>]*>\s*<\/\1>/gi, '')
+                            .replace(/<em>\s*<em>/gi, '<em>')
+                            .replace(/<\/em>\s*<\/em>/gi, '</em>');
+                    } while (inner !== before);
+                    return pOpen + inner + pClose;
+                }
+            );
+            return out.replace(
+                /^[\t ]*<p\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit2?\b[^"']*["'][^>]*>\s*(?:<(?:em|i|strong|b|u)\b[^>]*>\s*<\/(?:em|i|strong|b|u)>\s*)+<\/p>\s*\r?\n?/gmi,
+                ''
+            );
+        }
+
+        function joinSasaParagraphClosingTags(html) {
+            return String(html || '').replace(
+                /(<!--\s*SASA-1\s*-->)([\s\S]*?)(<!--\s*SASA-2\s*-->)/gi,
+                function (_zoneMatch, marker1, zoneBody, marker2) {
+                    zoneBody = zoneBody.replace(
+                        /(<p\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit2?\b[^"']*["'][^>]*>)([\s\S]*?)(<\/p>)/gi,
+                        function (_pMatch, pOpen, inner, pClose) {
+                            inner = inner.replace(
+                                /[\t ]*(?:\r?\n[\t ]*)+(?=(?:<\/(?:em|i|strong|b|u)>[\t ]*)*$)/i,
+                                ''
+                            );
+                            return pOpen + inner + pClose;
+                        }
+                    );
+                    return marker1 + zoneBody + marker2;
+                }
+            );
+        }
+
+        function designSelectionHasCssClass(el, className) {
+            if (!el || !className) return false;
+            var node = el;
+            while (node && node.nodeType === 1 && node.tagName !== 'BODY') {
+                if (node.classList && node.classList.contains(className)) return true;
+                node = node.parentElement;
+            }
+            return false;
+        }
+
         // In design mode, keep trailing spaces visible in editable article paragraphs.
         // This avoids the "space exists in code but not visible in design" confusion.
         function ensureDesignWhitespaceEditingStyle(doc) {
@@ -6160,19 +7800,66 @@ if (isset($_GET['action'])) {
                 'body[contenteditable=\"true\"] p.text_obisnuit,' +
                 'body[contenteditable=\"true\"] p.text_obisnuit2 {' +
                 ' white-space: break-spaces !important;' +
-                '}' +
-                'span[data-editor-visual-green=\"1\"]{' +
-                ' color:#16a34a!important;' +
-                '}' +
-                '[data-editor-visual-badge-layer]{' +
-                ' position:absolute!important;left:0;top:0;width:0;height:0;z-index:2147483640!important;pointer-events:none!important;' +
-                '}' +
-                '[data-editor-visual-badge]{' +
-                ' position:absolute!important;width:24px;height:24px;line-height:24px;text-align:center;border-radius:999px;' +
-                ' background:#c91f1f!important;color:#fff!important;border:2px solid #fff!important;box-shadow:0 1px 6px rgba(0,0,0,.35)!important;' +
-                ' font:700 14px/22px Arial,sans-serif!important;cursor:pointer!important;pointer-events:auto!important;user-select:none!important;' +
                 '}';
             doc.head.appendChild(st);
+        }
+
+        /** Extrage <!-- JavaScript --> + toate scripturile din body (referință imutabilă per tab). */
+        function extractProtectedBodyScriptTail(html) {
+            const bodyMatch = /<body[^>]*>([\s\S]*)<\/body>/i.exec(String(html || ''));
+            if (!bodyMatch) return null;
+            const inner = bodyMatch[1];
+            const jsMarker = /<!--\s*JavaScript\s*-->/i;
+            const idx = inner.search(jsMarker);
+            if (idx !== -1) {
+                const tail = inner.slice(idx).trimEnd();
+                return /<script\b/i.test(tail) ? tail : null;
+            }
+            const blocks = inner.match(/<script\b[^>]*>[\s\S]*?<\/script>/gi);
+            if (!blocks || !blocks.length) return null;
+            return blocks.join('\n    ');
+        }
+
+        function applyProtectedScriptsToFullHtml(html, protectedTail) {
+            if (!protectedTail) return html;
+            const bodyRe = /<body([^>]*)>[\s\S]*<\/body>/i;
+            const bodyMatch = bodyRe.exec(String(html || ''));
+            if (!bodyMatch) return html;
+            const bodyInner = bodyMatch[0].replace(/^<body[^>]*>/i, '').replace(/<\/body>$/i, '');
+            if (/<script\b/i.test(bodyInner)) return html;
+            const mergedInner = restoreProtectedBodyScripts(bodyInner, bodyInner, protectedTail);
+            if (mergedInner === bodyInner) return html;
+            return html.slice(0, bodyMatch.index) + '<body' + bodyMatch[1] + '>' + mergedInner + '</body>' +
+                html.slice(bodyMatch.index + bodyMatch[0].length);
+        }
+
+        /** Păstrează la sync blocul <!-- JavaScript --> + scripturi din body (preview-ul le elimină). */
+        function restoreProtectedBodyScripts(originalBodyInner, designBodyInner, protectedTail) {
+            if (!designBodyInner) return designBodyInner;
+            if (/<script\b/i.test(designBodyInner)) return designBodyInner;
+
+            let tail = protectedTail || null;
+            if (!tail && originalBodyInner && /<script\b/i.test(originalBodyInner)) {
+                const jsMarker = /<!--\s*JavaScript\s*-->/i;
+                const tailStart = originalBodyInner.search(jsMarker);
+                if (tailStart !== -1) {
+                    tail = originalBodyInner.slice(tailStart).trimEnd();
+                } else {
+                    const blocks = originalBodyInner.match(/<script\b[^>]*>[\s\S]*?<\/script>/gi) || [];
+                    if (blocks.length) tail = blocks.join('\n    ');
+                }
+            }
+            if (!tail) return designBodyInner;
+
+            let core = designBodyInner;
+            const jsMarker = /<!--\s*JavaScript\s*-->/i;
+            const designJsIdx = core.search(jsMarker);
+            if (designJsIdx !== -1) {
+                core = core.slice(0, designJsIdx).trimEnd();
+            } else {
+                core = core.replace(/(?:\s*<!--(?:(?!-->)[\s\S])*-->\s*)+$/i, '').trimEnd();
+            }
+            return core + '\n    ' + tail + '\n';
         }
 
         function syncFromDesign(force) {
@@ -6198,13 +7885,29 @@ if (isset($_GET['action'])) {
             // Remove CROP highlight from DOM before reading so it never persists to code
             clearSasaDesignHighlight(doc);
             cleanupParagraphBoundaryBrArtifacts(doc);
+            removePasteWhitespaceNormalSpansFromDom(doc.body);
             // Replace &nbsp; with regular space in SASA region and h1.den_articol
             var rawInner = cleanNbspInHtml(doc.body.innerHTML);
-            rawInner = stripEditorLocalVisualMarksFromHtml(rawInner);
+            rawInner = removePasteWhitespaceNormalSpansFromHtml(rawInner);
             // Remove data-orig-class helper attribute so it never persists to saved code
             rawInner = rawInner.replace(/\s*data-orig-class="[^"]*"/gi, '');
+            // Safety net: fold accidental orphan text back into the emptied block
+            // tag next to it ("<p ...></p>text" / "<h1 ...></h1>text" become
+            // "<p ...>text</p>" / "<h1 ...>text</h1>"). This shape appears when a
+            // paste/edit destroys a block's contents and drops the text after it.
+            rawInner = rawInner.replace(
+                /<((p|h[1-6])\b[^>]*)>\s*<\/\2>([^<]+)(?=<|$)/gi,
+                function (match, openTag, tagName, orphanText) {
+                    if (!orphanText.trim()) return match;
+                    return '<' + openTag + '>' + orphanText + '</' + tagName + '>';
+                }
+            );
             rawInner = normalizeBlockWrappedInlineFormat(rawInner, 'em');
             rawInner = normalizeBlockWrappedInlineFormat(rawInner, 'strong');
+            rawInner = normalizeBlockWrappedInlineFormat(rawInner, 'u');
+            rawInner = normalizeSpanWrappedParagraphClass(rawInner);
+            rawInner = removeOrphanClosingSpansFromParagraphs(rawInner);
+            rawInner = normalizeTextParagraphInlineFormatting(rawInner);
             // Note: space collapsing is handled per-node in collapseSpacesInDesignDOM()
             // to avoid destroying indentation in the code editor.
             // Ensure line breaks between block-level elements (Design outputs them on one line)
@@ -6218,6 +7921,16 @@ if (isset($_GET['action'])) {
             // Preserve original tag names (i vs em, b vs strong) from the code editor
             // so that browser normalisation does not silently rename them.
             var oldBodyInner = bodyMatch[0].replace(/^<body[^>]*>/i, '').replace(/<\/body>$/i, '');
+            var protectedTail = null;
+            if (activeTabId) {
+                for (var _ti = 0; _ti < tabs.length; _ti++) {
+                    if (tabs[_ti].id === activeTabId) {
+                        protectedTail = tabs[_ti].protectedBodyScriptTail;
+                        break;
+                    }
+                }
+            }
+            rawInner = restoreProtectedBodyScripts(oldBodyInner, rawInner, protectedTail);
             rawInner = preserveEquivTags(oldBodyInner, rawInner);
             const newBody = '<body' + bodyMatch[1] + '>' + rawInner + '</body>';
             // Only update code if the body actually changed (avoids false dirty on select/copy)
@@ -6265,7 +7978,12 @@ if (isset($_GET['action'])) {
             doc.body.contentEditable = 'true';
             ensureDesignWhitespaceEditingStyle(doc);
             // Track that design panel was last focused (for Find scope in split mode)
-            doc.addEventListener('mousedown', () => { _frDesignWasLastFocused = true; });
+            doc.addEventListener('mousedown', () => {
+                _frDesignWasLastFocused = true;
+                // A click inside Design starts a genuinely new selection. Toolbar
+                // clicks happen in the parent document and must keep the last range.
+                lastDesignSelectionRange = null;
+            });
             // Block text drag-and-drop in design panel (prevents accidental moves)
             doc.addEventListener('dragstart', function (e) { e.preventDefault(); });
             doc.addEventListener('drop', function (e) { e.preventDefault(); });
@@ -6362,17 +8080,222 @@ if (isset($_GET['action'])) {
                 return null;
             }
 
+            function closestPasteBlock(node) {
+                while (node && node !== doc.body) {
+                    if (node.nodeType === Node.ELEMENT_NODE && /^(?:P|H[1-6])$/.test(node.tagName)) return node;
+                    node = node.parentNode;
+                }
+                return null;
+            }
+
+            function normalizePasteCompareText(value) {
+                return String(value || '')
+                    .replace(/\u00a0/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+            }
+
+            // Block tags (<p>/<h1>-<h6>) that the selection wraps COMPLETELY.
+            // Happens when the selection is anchored in the whitespace between
+            // tags (double/triple-click can stretch the selection past the
+            // element edges). deleteContents() would then destroy the tag and
+            // leave the pasted text orphaned between blocks: <p ...></p>text.
+            function blocksFullyInsideRange(range) {
+                let root = range.commonAncestorContainer;
+                if (root && root.nodeType !== Node.ELEMENT_NODE) root = root.parentNode;
+                if (!root || !root.querySelectorAll) return [];
+                const found = [];
+                const blocks = root.querySelectorAll('p, h1, h2, h3, h4, h5, h6');
+                for (let i = 0; i < blocks.length; i++) {
+                    const blockRange = doc.createRange();
+                    blockRange.selectNode(blocks[i]);
+                    if (range.compareBoundaryPoints(Range.START_TO_START, blockRange) <= 0 &&
+                        range.compareBoundaryPoints(Range.END_TO_END, blockRange) >= 0) {
+                        found.push(blocks[i]);
+                    }
+                }
+                return found;
+            }
+
+            function isEmptyPasteBlock(el) {
+                return !!(el && /^(?:P|H[1-6])$/.test(el.nodeName) &&
+                    !normalizePasteCompareText(el.textContent) &&
+                    !el.querySelector('img, hr, input, iframe, video, svg, canvas'));
+            }
+
+            function rangeIntersectsPasteNode(range, node) {
+                if (!range || !node) return false;
+                try {
+                    return range.intersectsNode(node);
+                } catch (e) {
+                    try {
+                        const nodeRange = doc.createRange();
+                        nodeRange.selectNode(node);
+                        return range.compareBoundaryPoints(Range.START_TO_END, nodeRange) < 0 &&
+                            range.compareBoundaryPoints(Range.END_TO_START, nodeRange) > 0;
+                    } catch (_) {
+                        return false;
+                    }
+                }
+            }
+
+            function pasteBoundaryBlock(range, atStart) {
+                let container = atStart ? range.startContainer : range.endContainer;
+                const offset = atStart ? range.startOffset : range.endOffset;
+                if (container && container.nodeType === Node.ELEMENT_NODE) {
+                    let child = null;
+                    if (atStart) {
+                        child = container.childNodes[offset] || container.childNodes[offset - 1] || null;
+                    } else {
+                        child = container.childNodes[offset - 1] || container.childNodes[offset] || null;
+                    }
+                    if (child) {
+                        if (child.nodeType === Node.TEXT_NODE) return closestPasteBlock(child);
+                        if (child.nodeType === Node.ELEMENT_NODE) {
+                            if (/^(?:P|H[1-6])$/.test(child.nodeName)) return child;
+                            return child.closest ? child.closest('p,h1,h2,h3,h4,h5,h6') : null;
+                        }
+                    }
+                }
+                return closestPasteBlock(container);
+            }
+
+            function pasteIntoWholeSelectedBlockText(range, text, sel) {
+                const selectedText = normalizePasteCompareText(range.toString());
+                if (!selectedText) return false;
+                const candidates = [];
+                function addCandidate(block) {
+                    if (!block || !/^(?:P|H[1-6])$/.test(block.nodeName)) return;
+                    if (candidates.indexOf(block) === -1) candidates.push(block);
+                }
+                addCandidate(closestPasteBlock(range.startContainer));
+                addCandidate(closestPasteBlock(range.endContainer));
+                addCandidate(pasteBoundaryBlock(range, true));
+                addCandidate(pasteBoundaryBlock(range, false));
+
+                let target = null;
+                for (let i = 0; i < candidates.length; i++) {
+                    if (normalizePasteCompareText(candidates[i].textContent) === selectedText) {
+                        target = candidates[i];
+                        break;
+                    }
+                }
+                if (!target) {
+                    let root = range.commonAncestorContainer;
+                    if (root && root.nodeType !== Node.ELEMENT_NODE) root = root.parentNode;
+                    if (!root || !root.querySelectorAll) root = doc.body;
+                    const blocks = root.querySelectorAll('p, h1, h2, h3, h4, h5, h6');
+                    for (let i = 0; i < blocks.length; i++) {
+                        if (!rangeIntersectsPasteNode(range, blocks[i])) continue;
+                        if (normalizePasteCompareText(blocks[i].textContent) === selectedText) {
+                            target = blocks[i];
+                            break;
+                        }
+                    }
+                }
+                if (!target) return false;
+
+                target.textContent = text;
+                target.normalize();
+                let caretNode = target.lastChild;
+                if (!caretNode || caretNode.nodeType !== Node.TEXT_NODE) {
+                    caretNode = doc.createTextNode('');
+                    target.appendChild(caretNode);
+                }
+                const newRange = doc.createRange();
+                newRange.setStart(caretNode, caretNode.nodeValue.length);
+                newRange.setEnd(caretNode, caretNode.nodeValue.length);
+                sel.removeAllRanges();
+                sel.addRange(newRange);
+                return true;
+            }
+
+            // Paste over a fully-wrapped block: put the text INSIDE the existing
+            // tag (keeping the tag name, class and all attributes) instead of
+            // letting deleteContents destroy the tag.
+            function pasteIntoSwallowedBlock(range, text, sel) {
+                const swallowed = blocksFullyInsideRange(range);
+                if (!swallowed.length) return false;
+                let target = null;
+                for (let i = 0; i < swallowed.length; i++) {
+                    if (normalizePasteCompareText(swallowed[i].textContent)) { target = swallowed[i]; break; }
+                }
+                if (!target) target = swallowed[0];
+                target.textContent = text;
+                // Other blocks fully inside the selection were selected for
+                // replacement too — remove them so the paste doesn't duplicate.
+                for (let i = 0; i < swallowed.length; i++) {
+                    if (swallowed[i] !== target && swallowed[i].parentNode) {
+                        swallowed[i].parentNode.removeChild(swallowed[i]);
+                    }
+                }
+                const caretNode = target.firstChild;
+                const newRange = doc.createRange();
+                newRange.setStart(caretNode, caretNode.nodeValue.length);
+                newRange.setEnd(caretNode, caretNode.nodeValue.length);
+                sel.removeAllRanges();
+                sel.addRange(newRange);
+                return true;
+            }
+
             function insertPlainTextParagraphsAtSelection(range, paragraphs) {
                 if (!paragraphs || paragraphs.length < 2) return false;
-                const firstP = closestPasteParagraph(range.startContainer);
+                return insertParagraphBlocksAtSelection(range, paragraphs.map(function (txt) {
+                    return { cls: 'text_obisnuit', text: txt };
+                }));
+            }
+
+            // Paste de Markdown: un singur paragraf in mijlocul unui text existent se
+            // insereaza inline (<em>/<span>); altfel paragrafele inlocuiesc blocul selectat.
+            function insertMarkdownAtSelection(range, sel, blocks, rawText) {
+                if (!blocks.length) return false;
+                if (blocks.length === 1) {
+                    const p = closestPasteParagraph(range.startContainer);
+                    const sameP = p && p === closestPasteParagraph(range.endContainer);
+                    const pText = sameP ? normalizePasteCompareText(p.textContent) : '';
+                    const coversP = sameP && (!pText || normalizePasteCompareText(range.toString()) === pText);
+                    if (sameP && !coversP) {
+                        const tpl = doc.createElement('template');
+                        const lead = /^[ \t ]/.test(rawText || '') ? ' ' : '';
+                        const trail = /[ \t ]$/.test(rawText || '') ? ' ' : '';
+                        tpl.innerHTML = lead + (blocks[0].cls === 'text_obisnuit2'
+                            ? '<span class="text_obisnuit2">' + blocks[0].html + '</span>'
+                            : blocks[0].html) + trail;
+                        const lastNode = tpl.content.lastChild;
+                        range.deleteContents();
+                        range.insertNode(tpl.content);
+                        if (lastNode) {
+                            const r = doc.createRange();
+                            r.setStartAfter(lastNode);
+                            r.collapse(true);
+                            sel.removeAllRanges();
+                            sel.addRange(r);
+                        }
+                        return true;
+                    }
+                }
+                return insertParagraphBlocksAtSelection(range, blocks);
+            }
+
+            // blocks: [{ cls, text }] sau [{ cls, html }]
+            function insertParagraphBlocksAtSelection(range, blocks) {
+                let firstP = closestPasteParagraph(range.startContainer);
                 let lastP = closestPasteParagraph(range.endContainer) || firstP;
+                if (!firstP) {
+                    const swallowed = blocksFullyInsideRange(range).filter(function (b) { return b.tagName === 'P'; });
+                    if (swallowed.length) {
+                        firstP = swallowed[0];
+                        lastP = swallowed[swallowed.length - 1];
+                    }
+                }
                 if (firstP && lastP && firstP.parentNode !== lastP.parentNode) lastP = firstP;
                 const frag = doc.createDocumentFragment();
                 let lastInserted = null;
-                paragraphs.forEach(function (txt) {
+                blocks.forEach(function (b) {
                     const p = doc.createElement('p');
-                    p.className = 'text_obisnuit';
-                    p.textContent = txt;
+                    p.className = b.cls || 'text_obisnuit';
+                    if (b.html != null) p.innerHTML = b.html;
+                    else p.textContent = b.text;
                     lastInserted = p;
                     frag.appendChild(p);
                 });
@@ -6405,6 +8328,20 @@ if (isset($_GET['action'])) {
                 return true;
             }
 
+            function htmlClipboardToPlainText(html) {
+                if (!html) return '';
+                const tmp = doc.createElement('div');
+                tmp.innerHTML = html;
+                return tmp.innerText || tmp.textContent || '';
+            }
+
+            function finishPlainTextPaste() {
+                removePasteWhitespaceNormalSpansFromDom(doc.body);
+                cleanupParagraphBoundaryBrArtifacts(doc);
+                clearTimeout(designInputDebounceTimer);
+                designInputDebounceTimer = setTimeout(syncFromDesign, 80);
+            }
+
             doc.addEventListener('paste', (e) => {
                 // Force copy-paste to insert as plain text so we don't bring in
                 // inline styles, spans, or classes from external sources (e.g. Google Translate).
@@ -6412,8 +8349,11 @@ if (isset($_GET['action'])) {
                 // because execCommand can destroy parent DOM structure (tags, classes,
                 // links) when replacing the entire content of an element.
                 e.preventDefault();
-                clearVisualGreenHistory();
-                let text = (e.clipboardData || window.clipboardData).getData('text/plain');
+                e.stopPropagation();
+                if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+                const clipboard = e.clipboardData || window.clipboardData;
+                let text = clipboard ? clipboard.getData('text/plain') : '';
+                if (!text && clipboard) text = htmlClipboardToPlainText(clipboard.getData('text/html'));
                 if (!text) return;
                 // Collapse multiple consecutive spaces into one
                 text = text.replace(/ {2,}/g, ' ');
@@ -6422,10 +8362,18 @@ if (isset($_GET['action'])) {
                 const sel = win && win.getSelection();
                 if (!sel || sel.rangeCount === 0) return;
                 const range = sel.getRangeAt(0);
+                if (looksLikeMarkdown(text) &&
+                    insertMarkdownAtSelection(range, sel, markdownToParagraphBlocks(text), text)) {
+                    finishPlainTextPaste();
+                    return;
+                }
                 const pasteParagraphs = splitPlainTextIntoPasteParagraphs(text);
                 if (insertPlainTextParagraphsAtSelection(range, pasteParagraphs)) {
-                    clearTimeout(designInputDebounceTimer);
-                    designInputDebounceTimer = setTimeout(syncFromDesign, 80);
+                    finishPlainTextPaste();
+                    return;
+                }
+                if (pasteIntoWholeSelectedBlockText(range, text, sel)) {
+                    finishPlainTextPaste();
                     return;
                 }
 
@@ -6447,6 +8395,15 @@ if (isset($_GET['action'])) {
                     sel.removeAllRanges();
                     sel.addRange(newRange);
                 }
+                // Case 1.5: the selection wraps one or more whole block tags
+                // (<p>/<h1>-<h6>) — double/triple-click often anchors the
+                // selection in the whitespace around the tag. Replace the text
+                // INSIDE the tag so its name/class/attributes survive; letting
+                // this fall through to deleteContents would destroy the tag and
+                // leave "<p class=...></p>orphan text" in the code.
+                else if (pasteIntoSwallowedBlock(range, text, sel)) {
+                    // handled — nothing else to do
+                }
                 // Case 2: Element-level or cross-node selection — use deleteContents
                 // + insertNode. deleteContents preserves parent structure (just empties
                 // selected content), unlike execCommand which restructures the DOM.
@@ -6467,20 +8424,33 @@ if (isset($_GET['action'])) {
                     range.deleteContents();
                     const textNode = doc.createTextNode(text);
                     range.insertNode(textNode);
-                    if (textNode.parentNode) textNode.parentNode.normalize();
 
-                    // If text ended up outside a <p> (direct child of body / structural div),
-                    // wrap it in <p class="text_obisnuit"> and remove empty <p> remnants.
+                    // If text ended up outside a <p>/<h*> block (direct child of body
+                    // or of a structural container div), it would serialize as orphan
+                    // text between tags. Refill the adjacent block that deleteContents
+                    // just emptied (keeps its tag + class), or wrap the text in
+                    // <p class="text_obisnuit"> and remove empty <p> remnants.
                     const parent = textNode.parentNode;
-                    const isOrphan = parent && (
+                    const isOrphan = parent && !closestPasteBlock(textNode) && (
                         parent === doc.body ||
-                        (parent.nodeName === 'DIV' && parent.getAttribute('align'))
+                        /^(?:DIV|SECTION|ARTICLE|MAIN|ASIDE|HEADER|FOOTER)$/.test(parent.nodeName)
                     );
                     if (isOrphan) {
-                        const wrapper = doc.createElement('p');
-                        wrapper.className = 'text_obisnuit';
-                        parent.insertBefore(wrapper, textNode);
-                        wrapper.appendChild(textNode);
+                        let wrapper = null;
+                        if (isEmptyPasteBlock(textNode.previousElementSibling)) {
+                            wrapper = textNode.previousElementSibling;
+                        } else if (isEmptyPasteBlock(textNode.nextElementSibling)) {
+                            wrapper = textNode.nextElementSibling;
+                        }
+                        if (wrapper) {
+                            wrapper.textContent = '';
+                            wrapper.appendChild(textNode);
+                        } else {
+                            wrapper = doc.createElement('p');
+                            wrapper.className = 'text_obisnuit';
+                            parent.insertBefore(wrapper, textNode);
+                            wrapper.appendChild(textNode);
+                        }
                         // Remove empty <p> siblings left by deleteContents
                         for (let i = touchedPs.length - 1; i >= 0; i--) {
                             const p = touchedPs[i];
@@ -6517,19 +8487,16 @@ if (isset($_GET['action'])) {
                         sel.addRange(newRange);
                     }
                 }
-                clearTimeout(designInputDebounceTimer);
-                designInputDebounceTimer = setTimeout(syncFromDesign, 80);
-            });
+                finishPlainTextPaste();
+            }, true);
             doc.body.addEventListener('input', () => {
                 if (isApplyingUndoRedo) return;
                 if (_suppressInputAfterCopy) return;
-                clearVisualGreenHistory();
                 // Clear design-click highlight when user edits in design
                 if (_imgClickMark) { _imgClickMark.clear(); _imgClickMark = null; }
                 // Collapse multiple spaces in design DOM text nodes (real-time cleanup)
                 collapseSpacesInDesignDOM(doc);
                 cleanupParagraphBoundaryBrArtifacts(doc);
-                setTimeout(function () { updateVisualGreenBadges(doc); }, 90);
                 clearTimeout(designInputDebounceTimer);
                 designInputDebounceTimer = setTimeout(syncFromDesign, 80);
             });
@@ -6561,16 +8528,16 @@ if (isset($_GET['action'])) {
             doc.addEventListener('selectionchange', () => {
                 clearTimeout(_selChangeTimer);
                 _selChangeTimer = setTimeout(() => {
-                    rememberDesignSelectionRange();
+                    rememberDesignSelectionRange(iframe.contentWindow, doc);
                     if (!isSelectionFromCode) updatePropertiesPanelFromSelection();
                 }, 60);
             });
             doc.addEventListener('mouseup', () => {
-                rememberDesignSelectionRange();
+                rememberDesignSelectionRange(iframe.contentWindow, doc);
                 updatePropertiesPanelFromSelection();
             });
             doc.addEventListener('keyup', () => {
-                rememberDesignSelectionRange();
+                rememberDesignSelectionRange(iframe.contentWindow, doc);
                 updatePropertiesPanelFromSelection();
             });
             // ── Intercept mousedown on images inside anchors so we can
@@ -6629,14 +8596,6 @@ if (isset($_GET['action'])) {
                 if (typeof syncClickedElementToCode === 'function') syncClickedElementToCode(target);
             }, true);
             doc.addEventListener('keydown', e => {
-                if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'v' || e.key === 'V')) {
-                    if (applyVisualGreenShortcut()) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        _lastCtrlComboTime = Date.now();
-                        return;
-                    }
-                }
                 // ── SASA selection intercept for DESIGN panel ──
                 // When SASA is active and user types/deletes in design, the visual
                 // highlight is NOT a real browser selection so contentEditable can't
@@ -6695,7 +8654,6 @@ if (isset($_GET['action'])) {
                 if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
                     e.preventDefault();
                     e.stopPropagation();
-                    clearVisualGreenHistory();
                     designSaveSnapshot();
                     const win = iframe.contentWindow;
                     const sel = win && win.getSelection();
@@ -6843,7 +8801,6 @@ if (isset($_GET['action'])) {
 
         function doUndoFromDesign() {
             if (!editor) return;
-            if (doVisualGreenUndo()) return;
             // In Code view (sau pentru fisiere non-HTML), folosim undo-ul nativ al editorului de cod.
             if (!isCurrentFileHtml() || viewMode === 'code') {
                 try { editor.undo(); } catch (e) { }
@@ -6926,7 +8883,6 @@ if (isset($_GET['action'])) {
 
         function doRedoFromDesign() {
             if (!editor) return;
-            if (doVisualGreenRedo()) return;
             // In Code view (sau pentru fisiere non-HTML), folosim redo-ul nativ al editorului de cod.
             if (!isCurrentFileHtml() || viewMode === 'code') {
                 try { editor.redo(); } catch (e) { }
@@ -7091,12 +9047,16 @@ if (isset($_GET['action'])) {
         // so makeDesignEditable runs as soon as the DOM is parsed — not after
         // all external CSS/fonts finish loading (which can take 30+ seconds).
         window.__previewDOMReady = null;
+        var _previewRequestSeq = 0;
 
         // When set, updatePreview will restore this scroll position after reload.
         var _pendingPreviewScroll = null;
 
         function updatePreview() {
             const iframe = document.getElementById('preview');
+            const previewRequestId = ++_previewRequestSeq;
+            const requestedFile = currentFile;
+            const requestedTabId = activeTabId;
 
             // Files with a known path on disk → use PHP preview.
             // PHP strips scripts/loaders, rebuilds clean HTML, and serves it
@@ -7104,10 +9064,19 @@ if (isset($_GET['action'])) {
             // (blob: URLs have issues with "preferred" stylesheets and encoded paths).
             if (currentFile) {
                 let done = false;
+                const previewToken = String(previewRequestId);
                 const scrollToRestore = _pendingPreviewScroll;
                 _pendingPreviewScroll = null;
-                const doEdit = () => {
-                    if (done) return;
+                const doEdit = (loadedUrl) => {
+                    if (done || previewRequestId !== _previewRequestSeq ||
+                        requestedTabId !== activeTabId || requestedFile !== currentFile) return;
+                    let actualUrl = (typeof loadedUrl === 'string') ? loadedUrl : '';
+                    if (!actualUrl) {
+                        try { actualUrl = iframe.contentWindow.location.href || ''; } catch (e) { actualUrl = ''; }
+                    }
+                    // A previous tab may finish DOMContentLoaded after this callback was
+                    // replaced. Ignore it unless the loaded document belongs to this request.
+                    if (actualUrl && actualUrl.indexOf('previewToken=' + previewToken) === -1) return;
                     done = true;
                     if (isCurrentFileHtml()) makeDesignEditable();
                     // Dacă un tab de browser este deschis, ne asigurăm că iframe-ul lui rămâne pe URL-ul curent din tab
@@ -7129,8 +9098,13 @@ if (isset($_GET['action'])) {
                     }
                 };
                 window.__previewDOMReady = doEdit;
-                iframe.onload = doEdit;
-                iframe.src = '?action=preview&file=' + encodeURIComponent(currentFile) + '&t=' + Date.now();
+                iframe.onload = function () {
+                    let loadedUrl = '';
+                    try { loadedUrl = iframe.contentWindow.location.href || ''; } catch (e) { loadedUrl = ''; }
+                    doEdit(loadedUrl);
+                };
+                iframe.src = '?action=preview&file=' + encodeURIComponent(currentFile) +
+                    '&t=' + Date.now() + '&previewToken=' + previewToken;
                 return;
             }
 
@@ -7144,7 +9118,12 @@ if (isset($_GET['action'])) {
             content = content.replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, '');
 
             // ── Collect stylesheets ──
-            let allStyles = '';
+            // Stil de rezerva pentru pagini fara CSS-ul site-ului (ex. pagina goala):
+            // paragraful bold sa se vada bold. Pus primul, ca CSS-ul site-ului sa aiba prioritate.
+            let allStyles = '<style type="text/css" id="editor-fallback">'
+                + '.text_obisnuit2{font-weight:bold}'
+                + 'html,body{min-height:100%}body{min-height:calc(100vh - 20px)}'
+                + '</style>\n';
             const linkRe = /<link\b[^>]*\brel=["\']?stylesheet["\']?[^>]*\/?>/gi;
             let lm;
             while ((lm = linkRe.exec(content)) !== null) {
@@ -7212,6 +9191,91 @@ if (isset($_GET['action'])) {
             if (ov) ov.style.display = 'none';
         }
 
+        // ── Butonul „Trimite E-mail”: confirmare → monitor_index.py in fundal → fereastra cu ce a afisat scriptul ──
+        function showEmailConsole(title, text, color) {
+            let dlg = document.getElementById('emailConsoleDialog');
+            if (!dlg) {
+                dlg = document.createElement('div');
+                dlg.id = 'emailConsoleDialog';
+                dlg.style.cssText = 'position:fixed;inset:0;z-index:100002;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55)';
+                dlg.innerHTML =
+                    '<div style="width:min(860px,calc(100% - 32px));max-height:85vh;display:flex;flex-direction:column;background:#1e1e1e;border:1px solid #444;border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.6)">' +
+                    '<div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #333">' +
+                    '<b class="ec-title" style="flex:1;color:#eee;font-size:17px"></b>' +
+                    '<button class="btn btn-ghost ec-close">Închide</button></div>' +
+                    '<pre class="ec-body" style="margin:0;padding:16px 18px;overflow:auto;white-space:pre-wrap;word-break:break-word;' +
+                    'font:15px/1.5 Consolas,\'Courier New\',monospace"></pre></div>';
+                document.body.appendChild(dlg);
+                const close = function () { if (!dlg.dataset.busy) dlg.style.display = 'none'; };
+                dlg.querySelector('.ec-close').onclick = close;
+                dlg.addEventListener('click', function (e) { if (e.target === dlg) close(); });
+            }
+            dlg.style.display = 'flex';
+            dlg.querySelector('.ec-title').textContent = title;
+            const body = dlg.querySelector('.ec-body');
+            body.style.color = color || '#38bdf8';
+            body.textContent = text;
+            return dlg;
+        }
+        async function sendLatestArticleEmail() {
+            const btn = document.getElementById('btnSendArticleEmail');
+            if (btn && btn.disabled) return;
+            const post = async function (extra) {
+                const body = new URLSearchParams(extra || {});
+                const res = await fetch('?action=sendArticleEmail', { method: 'POST', body: body });
+                return res.json();
+            };
+            let info;
+            try { info = await post({ check: '1' }); }
+            catch (e) { showErrorPopup('Nu pot contacta serverul: ' + e.message); return; }
+            if (!info.ok) { showErrorPopup(info.error || 'Eroare necunoscută.'); return; }
+            if (!info.link) {
+                showErrorPopup('Nu am găsit niciun articol la începutul listei din ro/index.html.\nNu trimit nimic.');
+                return;
+            }
+            if (!window.confirm('Trimit pe email ultimul articol din index?\n\n' +
+                (info.title ? info.title + '\n' : '') + info.link)) return;
+            if (btn) { btn.disabled = true; btn.style.opacity = '.6'; }
+            const dlg = showEmailConsole('Trimite E-mail', 'Se trimite emailul în fundal...\n\n' + info.link, '#facc15');
+            dlg.dataset.busy = '1';
+            try {
+                const r = await post({});
+                delete dlg.dataset.busy;
+                if (!r.ok) {
+                    showEmailConsole('Trimite E-mail — eroare', r.error || 'Eroare necunoscută.', '#f87171');
+                    return;
+                }
+                let text = String(r.output || '').replace(/^\s+/, '').replace(/\s+$/, '');
+                if (r.errors && r.errors.trim()) text += '\n\n--- erori ---\n' + r.errors.trim();
+                if (r.timedOut) text += '\n\n✗ Scriptul a durat prea mult și a fost oprit.';
+                text += '\n>>>';
+                showEmailConsole(r.sent ? 'Email trimis ✓' : 'Emailul NU a fost confirmat ✗', text, r.sent ? '#38bdf8' : '#f87171');
+            } catch (e) {
+                delete dlg.dataset.busy;
+                showEmailConsole('Trimite E-mail — eroare', 'Eroare: ' + e.message, '#f87171');
+            } finally {
+                if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+            }
+        }
+
+        // „Continua la editor” fara niciun fisier deschis: pregateste o pagina goala editabila
+        // (altfel zona Design ramane un document alb in care nu se poate scrie/lipi).
+        var BLANK_EDITOR_PAGE = '<!DOCTYPE html>\n<html lang="ro">\n<head>\n<meta charset="utf-8">\n<title></title>\n</head>\n<body>\n<p class="text_obisnuit"><br></p>\n</body>\n</html>\n';
+        function continueToEditor() {
+            hideOverlay();
+            if (currentFile || tabs.some(function (t) { return t.type !== 'browser'; })) return;
+            if (!editor) return;
+            if (!editor.getValue().trim()) {
+                isSyncFromDesign = true;
+                editor.setValue(BLANK_EDITOR_PAGE);
+                isSyncFromDesign = false;
+                editor.getDoc().clearHistory();
+                isDirty = false;
+            }
+            setViewMode('design');
+            updatePreview();
+        }
+
         function showOverlay() {
             const ov = document.getElementById('startOverlay');
             if (ov) {
@@ -7242,63 +9306,65 @@ if (isset($_GET['action'])) {
             return node.closest('img, p, span, div, td, th, li, h1, h2, h3, h4, h5, h6, a, strong, em');
         }
 
-        let lastDesignSelectionRange = null;
-        let lastDesignSelectionDoc = null;
-
-        function designRangeStillInDocument(doc, range) {
-            if (!doc || !range || !doc.body) return false;
-            const node = range.commonAncestorContainer;
-            return node === doc.body || doc.body.contains(node.nodeType === Node.TEXT_NODE ? node.parentNode : node);
-        }
-
-        function rememberDesignSelectionRange() {
+        function getDesignSelectionRange() {
             const iframe = document.getElementById('preview');
             const win = iframe.contentWindow;
             const doc = iframe.contentDocument;
-            if (!win || !doc) return false;
+            if (!win || !doc) return null;
             const sel = win.getSelection();
-            if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+            if (!sel || sel.rangeCount === 0) {
+                return restoreLastDesignSelectionRange(win, doc);
+            }
+            const range = sel.getRangeAt(0);
+            if (range && !range.collapsed) {
+                rememberDesignSelectionRange(win, doc);
+                return { win, doc, sel, range };
+            }
+            const restored = restoreLastDesignSelectionRange(win, doc);
+            if (restored) return restored;
+            return { win, doc, sel, range };
+        }
+
+        function isUsableDesignRange(range, doc) {
             try {
-                const range = sel.getRangeAt(0);
-                if (!range || range.collapsed) return false;
-                lastDesignSelectionRange = range.cloneRange();
-                lastDesignSelectionDoc = doc;
-                return true;
+                return !!(range && doc && doc.body && !range.collapsed &&
+                    range.startContainer && range.endContainer &&
+                    range.startContainer.isConnected && range.endContainer.isConnected &&
+                    doc.body.contains(range.startContainer) && doc.body.contains(range.endContainer));
             } catch (e) {
                 return false;
             }
         }
 
-        function getDesignSelectionRange(useCached) {
-            const iframe = document.getElementById('preview');
-            const win = iframe.contentWindow;
-            const doc = iframe.contentDocument;
-            if (!win || !doc) return null;
-            const sel = win.getSelection();
-            if (sel && sel.rangeCount > 0) {
+        function rememberDesignSelectionRange(win, doc) {
+            try {
+                const sel = win && win.getSelection ? win.getSelection() : null;
+                if (!sel || sel.rangeCount === 0) return;
                 const range = sel.getRangeAt(0);
-                if (range && !range.collapsed) {
-                    lastDesignSelectionRange = range.cloneRange();
-                    lastDesignSelectionDoc = doc;
-                    return { win, doc, sel, range };
-                }
-                if (!useCached) return { win, doc, sel, range };
+                if (!range || range.collapsed) return;
+                lastDesignSelectionRange = { doc: doc, range: range.cloneRange(), text: sel.toString() };
+            } catch (e) {
+                lastDesignSelectionRange = null;
             }
-            if (useCached && lastDesignSelectionDoc === doc && designRangeStillInDocument(doc, lastDesignSelectionRange)) {
-                return { win, doc, sel, range: lastDesignSelectionRange.cloneRange(), cached: true };
-            }
-            return null;
         }
 
-        function getDesignSelectionRangeCurrentOnly() {
-            const iframe = document.getElementById('preview');
-            const win = iframe.contentWindow;
-            const doc = iframe.contentDocument;
-            if (!win || !doc) return null;
-            const sel = win.getSelection();
-            if (!sel || sel.rangeCount === 0) return null;
-            const range = sel.getRangeAt(0);
-            return { win, doc, sel, range };
+        function restoreLastDesignSelectionRange(win, doc) {
+            if (!lastDesignSelectionRange || lastDesignSelectionRange.doc !== doc) return null;
+            const saved = lastDesignSelectionRange.range;
+            if (!isUsableDesignRange(saved, doc)) {
+                lastDesignSelectionRange = null;
+                return null;
+            }
+            try {
+                const sel = win.getSelection();
+                const range = saved.cloneRange();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                return { win, doc, sel, range };
+            } catch (e) {
+                lastDesignSelectionRange = null;
+                return null;
+            }
         }
 
         function getDesignSelectionText() {
@@ -7800,6 +9866,7 @@ if (isset($_GET['action'])) {
             const sizeSel = document.getElementById('propSize');
             const boldBtn = document.getElementById('propBold');
             const italicBtn = document.getElementById('propItalic');
+            const underlineBtn = document.getElementById('propUnderline');
             const colorInp = document.getElementById('propColor');
             const bgInp = document.getElementById('propBg');
             const classSel = document.getElementById('propClass');
@@ -7853,8 +9920,11 @@ if (isset($_GET['action'])) {
             }
             boldBtn.style.background = (computed.fontWeight === '700' || computed.fontWeight === 'bold') ? 'rgba(59,130,246,0.3)' : '';
             italicBtn.style.background = computed.fontStyle === 'italic' ? 'rgba(59,130,246,0.3)' : '';
+            if (underlineBtn) underlineBtn.style.background = ((computed.textDecorationLine || computed.textDecoration || '').indexOf('underline') !== -1) ? 'rgba(59,130,246,0.3)' : '';
             const quickItalicBtn = document.getElementById('btnQuickItalic');
             if (quickItalicBtn) quickItalicBtn.style.background = italicBtn.style.background;
+            const quickUnderlineBtn = document.getElementById('btnQuickUnderline');
+            if (quickUnderlineBtn && underlineBtn) quickUnderlineBtn.style.background = underlineBtn.style.background;
             colorInp.value = rgbToHex(computed.color) || '#000000';
             bgInp.value = rgbToHex(computed.backgroundColor) || '#ffffff';
             if (classSel) {
@@ -7871,7 +9941,7 @@ if (isset($_GET['action'])) {
             const quickClassBtn = document.getElementById('btnClassObisnuit2');
             if (quickClassBtn) {
                 quickClassBtn.dataset.className = 'text_obisnuit2';
-                const hasClass = (' ' + (el.className || '') + ' ').indexOf(' text_obisnuit2 ') !== -1;
+                const hasClass = designSelectionHasCssClass(el, 'text_obisnuit2');
                 quickClassBtn.classList.toggle('active', hasClass);
             }
             // Link / Target
@@ -7904,98 +9974,9 @@ if (isset($_GET['action'])) {
             return '#' + [1, 2, 3].map(i => ('0' + parseInt(m[i], 10).toString(16)).slice(-2)).join('');
         }
 
-        function unwrapVisualGreenSpans(root) {
-            if (!root) return 0;
-            var spans = [];
-            if (root.matches && root.matches('span[data-editor-visual-green]')) spans.push(root);
-            if (root.querySelectorAll) {
-                spans = spans.concat(Array.from(root.querySelectorAll('span[data-editor-visual-green]')));
-            }
-            spans.forEach(function (span) {
-                var parent = span.parentNode;
-                if (!parent) return;
-                while (span.firstChild) parent.insertBefore(span.firstChild, span);
-                parent.removeChild(span);
-                if (parent.normalize) parent.normalize();
-            });
-            return spans.length;
-        }
-
-        function closestVisualGreenBlock(span, doc) {
-            if (!span || !span.closest) return null;
-            return span.closest('p,h1,h2,h3,h4,h5,h6,li,td,th,blockquote,section,article,div') ||
-                (span.parentElement && span.parentElement !== doc.body ? span.parentElement : null);
-        }
-
-        function updateVisualGreenBadges(doc) {
-            if (!doc) {
-                const iframe = document.getElementById('preview');
-                doc = iframe && iframe.contentDocument;
-            }
-            if (!doc || !doc.body) return;
-            ensureDesignWhitespaceEditingStyle(doc);
-            Array.from(doc.querySelectorAll('[data-editor-visual-badge-layer]')).forEach(function (layer) {
-                if (layer.parentNode) layer.parentNode.removeChild(layer);
-            });
-            const greenSpans = Array.from(doc.querySelectorAll('span[data-editor-visual-green]'));
-            if (!greenSpans.length) return;
-            const seen = new Set();
-            const blocks = [];
-            greenSpans.forEach(function (span) {
-                const block = closestVisualGreenBlock(span, doc);
-                if (!block || block === doc.body || seen.has(block)) return;
-                seen.add(block);
-                blocks.push(block);
-            });
-            blocks.sort(function (a, b) {
-                const ra = a.getBoundingClientRect();
-                const rb = b.getBoundingClientRect();
-                return (ra.top - rb.top) || (ra.left - rb.left);
-            });
-            const layer = doc.createElement('div');
-            layer.id = 'editorVisualGreenBadgesLayer';
-            layer.setAttribute('data-editor-visual-badge-layer', '1');
-            layer.setAttribute('contenteditable', 'false');
-            doc.body.appendChild(layer);
-            const win = doc.defaultView || window;
-            blocks.forEach(function (block, idx) {
-                const rect = block.getBoundingClientRect();
-                if (!rect || (rect.width === 0 && rect.height === 0)) return;
-                const badge = doc.createElement('span');
-                badge.setAttribute('data-editor-visual-badge', '1');
-                badge.setAttribute('contenteditable', 'false');
-                badge.textContent = String(idx + 1);
-                badge.title = 'Dublu click: sterge verdele din acest paragraf';
-                badge.style.left = Math.max(6, rect.left + (win.scrollX || 0) - 38) + 'px';
-                badge.style.top = (rect.top + (win.scrollY || 0) + Math.max(0, Math.min(12, rect.height / 2 - 12))) + 'px';
-                badge.addEventListener('mousedown', function (e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                });
-                badge.addEventListener('dblclick', function (e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    removeVisualGreenFromBlock(block);
-                });
-                layer.appendChild(badge);
-            });
-        }
-
-        function removeVisualGreenFromBlock(block) {
-            if (!block) return false;
-            const before = getVisualGreenBodyHtml();
-            const removed = unwrapVisualGreenSpans(block);
-            if (!removed) return false;
-            pushVisualGreenUndoSnapshot(before);
-            updateVisualGreenBadges(block.ownerDocument);
-            showToast('Verdele din paragraf a fost sters', 'success');
-            return true;
-        }
-
         function applyFontProperty(prop, value) {
             // Push the current body state BEFORE the change so undo can revert it.
             // Uses 500ms grouping so dragging the color picker only creates ONE undo entry.
-            clearVisualGreenHistory();
             designPushCurrentState();
             const info = getDesignSelectionRange();
             if (info && !info.range.collapsed) {
@@ -8023,98 +10004,7 @@ if (isset($_GET['action'])) {
             lastDesignSnapshot = getDesignBodyHtml();
         }
 
-        function rangeTouchesTextNode(doc, range, node) {
-            try {
-                if (range && range.intersectsNode) return range.intersectsNode(node);
-            } catch (e) {}
-            var textRange = doc.createRange();
-            textRange.selectNodeContents(node);
-            return rangesOverlap(range, textRange);
-        }
-
-        function collectTextRangesForLocalVisual(doc, range) {
-            var root = range.commonAncestorContainer;
-            if (root.nodeType === Node.TEXT_NODE) root = root.parentNode;
-            if (!root) root = doc.body;
-            var walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-                acceptNode: function (node) {
-                    if (!node.nodeValue) return NodeFilter.FILTER_REJECT;
-                    return rangeTouchesTextNode(doc, range, node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-                }
-            });
-            var items = [];
-            var node;
-            while ((node = walker.nextNode())) {
-                var start = (node === range.startContainer) ? range.startOffset : 0;
-                var end = (node === range.endContainer) ? range.endOffset : node.nodeValue.length;
-                if (start < end) items.push({ node: node, start: start, end: end });
-            }
-            return items;
-        }
-
-        function applyLocalVisualGreen(useCached) {
-            const info = getDesignSelectionRange(useCached !== false);
-            if (!info || !info.range || info.range.collapsed) return false;
-            const { doc, sel, range } = info;
-            ensureDesignWhitespaceEditingStyle(doc);
-
-            var items = collectTextRangesForLocalVisual(doc, range);
-            if (!items.length) return false;
-
-            var wrappers = [];
-            for (var i = items.length - 1; i >= 0; i--) {
-                var item = items[i];
-                var node = item.node;
-                if (!node || !node.parentNode) continue;
-                var parentEl = node.parentElement;
-                if (parentEl && parentEl.closest && parentEl.closest('span[data-editor-visual-green]')) {
-                    continue;
-                }
-                var selectedNode = node;
-                if (item.end < selectedNode.nodeValue.length) {
-                    selectedNode.splitText(item.end);
-                }
-                if (item.start > 0) {
-                    selectedNode = selectedNode.splitText(item.start);
-                }
-                if (!selectedNode.nodeValue) continue;
-                var span = doc.createElement('span');
-                span.setAttribute('data-editor-visual-green', '1');
-                selectedNode.parentNode.insertBefore(span, selectedNode);
-                span.appendChild(selectedNode);
-                wrappers.unshift(span);
-            }
-
-            if (wrappers.length) {
-                sel.removeAllRanges();
-                var newRange = doc.createRange();
-                newRange.setStartBefore(wrappers[0]);
-                newRange.setEndAfter(wrappers[wrappers.length - 1]);
-                sel.addRange(newRange);
-                return true;
-            }
-            return false;
-        }
-
-        function applyLocalVisualGreenFromCodeSelection() {
-            if (!editor || !editor.somethingSelected || !editor.somethingSelected()) return false;
-            syncSelectionToDesignFromCode();
-            return applyLocalVisualGreen(true);
-        }
-
-        function applyVisualGreenShortcut() {
-            const before = getVisualGreenBodyHtml();
-            const changed = applyLocalVisualGreen(false) ||
-                applyLocalVisualGreenFromCodeSelection() ||
-                applyLocalVisualGreen(true);
-            if (!changed) return false;
-            pushVisualGreenUndoSnapshot(before);
-            updateVisualGreenBadges();
-            return true;
-        }
-
         function applyLinkProperty() {
-            clearVisualGreenHistory();
             designPushCurrentState();
             var linkVal = document.getElementById('propLink').value.trim();
             var targetVal = document.getElementById('propLinkTarget').value;
@@ -8194,9 +10084,14 @@ if (isset($_GET['action'])) {
         function getSelectedTextBlocks(doc, range) {
             if (!doc || !doc.body || !range) return [];
             var selector = 'p, div, h1, h2, h3, h4, h5, h6, li, td, th, blockquote';
-            return Array.from(doc.body.querySelectorAll(selector)).filter(function (block) {
+            var blocks = Array.from(doc.body.querySelectorAll(selector)).filter(function (block) {
                 if (!range.intersectsNode(block)) return false;
                 return rangeIntersectsNonEmptyText(doc, range, block);
+            });
+            return blocks.filter(function (block) {
+                return !blocks.some(function (other) {
+                    return other !== block && block.contains(other);
+                });
             });
         }
 
@@ -8233,7 +10128,91 @@ if (isset($_GET['action'])) {
             return !!(range && range.toString && range.toString().trim());
         }
 
+        function normalizeInlineSelectionText(value) {
+            return String(value || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+        }
+
+        function selectionCoversWholeBlockText(range, block) {
+            if (!range || !block) return false;
+            var selectedText = normalizeInlineSelectionText(range.toString());
+            var blockText = normalizeInlineSelectionText(block.textContent || '');
+            return !!blockText && selectedText === blockText;
+        }
+
+        function closestInlineFormattingBlock(node) {
+            var selector = 'p,div,h1,h2,h3,h4,h5,h6,li,td,th,blockquote';
+            var el = node && node.nodeType === Node.ELEMENT_NODE ? node : (node ? node.parentElement : null);
+            return el && el.closest ? el.closest(selector) : null;
+        }
+
+        function getCommonInlineFormattingBlock(range) {
+            if (!range) return null;
+            var startBlock = closestInlineFormattingBlock(range.startContainer);
+            var endBlock = closestInlineFormattingBlock(range.endContainer);
+            return startBlock && startBlock === endBlock ? startBlock : null;
+        }
+
+        function getWholeSelectionInlineFormattingBlock(doc, range) {
+            var commonBlock = getCommonInlineFormattingBlock(range);
+            if (commonBlock && selectionCoversWholeBlockText(range, commonBlock)) return commonBlock;
+
+            var selectedText = normalizeInlineSelectionText(range && range.toString ? range.toString() : '');
+            if (!selectedText || !doc || !doc.body) return null;
+            var selector = 'p,div,h1,h2,h3,h4,h5,h6,li,td,th,blockquote';
+            var matches = Array.from(doc.body.querySelectorAll(selector)).filter(function (block) {
+                return normalizeInlineSelectionText(block.textContent || '') === selectedText;
+            });
+            matches = matches.filter(function (block) {
+                return !matches.some(function (other) {
+                    return other !== block && block.contains(other);
+                });
+            });
+            return matches.length === 1 ? matches[0] : null;
+        }
+
+        function isEmptyTextParagraph(node) {
+            if (!node || node.nodeType !== 1 || node.tagName !== 'P') return false;
+            if (!node.classList ||
+                (!node.classList.contains('text_obisnuit') && !node.classList.contains('text_obisnuit2'))) {
+                return false;
+            }
+            var clone = node.cloneNode(true);
+            clone.querySelectorAll('br').forEach(function (br) { br.remove(); });
+            return !normalizeInlineSelectionText(clone.textContent || '');
+        }
+
+        function adjacentElementAcrossWhitespace(node, direction) {
+            var sibling = node ? node[direction] : null;
+            while (sibling && sibling.nodeType === Node.TEXT_NODE &&
+                !normalizeInlineSelectionText(sibling.nodeValue || '')) {
+                sibling = sibling[direction];
+            }
+            return sibling && sibling.nodeType === Node.ELEMENT_NODE ? sibling : null;
+        }
+
+        function removeAdjacentEmptyTextParagraphs(block) {
+            if (!block || !block.parentNode) return;
+            var sibling = adjacentElementAcrossWhitespace(block, 'previousSibling');
+            while (isEmptyTextParagraph(sibling)) {
+                var previous = adjacentElementAcrossWhitespace(sibling, 'previousSibling');
+                sibling.remove();
+                sibling = previous;
+            }
+            sibling = adjacentElementAcrossWhitespace(block, 'nextSibling');
+            while (isEmptyTextParagraph(sibling)) {
+                var next = adjacentElementAcrossWhitespace(sibling, 'nextSibling');
+                sibling.remove();
+                sibling = next;
+            }
+        }
+
         function selectedBlockTextNodesHaveFormat(doc, range, tagName) {
+            if (range && range.commonAncestorContainer &&
+                range.commonAncestorContainer.nodeType === Node.TEXT_NODE) {
+                var rootText = range.commonAncestorContainer.nodeValue || '';
+                if (!rootText.trim()) return false;
+                return !!closestInlineFormatElement(range.commonAncestorContainer.parentElement, tagName);
+            }
             var walker = doc.createTreeWalker(range.commonAncestorContainer, NodeFilter.SHOW_TEXT, {
                 acceptNode: function (node) {
                     if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
@@ -8247,18 +10226,76 @@ if (isset($_GET['action'])) {
             while ((node = walker.nextNode())) {
                 found = true;
                 var parent = node.parentElement;
-                if (!parent || !parent.closest || !parent.closest(tagName)) return false;
+                if (!closestInlineFormatElement(parent, tagName)) return false;
             }
             return found;
         }
 
+        function getInlineFormatTagName(kind) {
+            if (kind === 'bold') return 'strong';
+            if (kind === 'underline') return 'u';
+            return 'em';
+        }
+
+        function inlineFormatSelector(tagName) {
+            return tagName === 'em' ? 'em,i:not([class])' : tagName;
+        }
+
+        function closestInlineFormatElement(node, tagName) {
+            var selector = inlineFormatSelector(tagName);
+            var el = node && node.nodeType === 1 ? node : (node ? node.parentElement : null);
+            while (el && el.nodeType === 1 && el.tagName !== 'BODY') {
+                if (el.matches && el.matches(selector)) return el;
+                el = el.parentElement;
+            }
+            return null;
+        }
+
+        function queryInlineFormatElements(root, tagName) {
+            if (!root || !root.querySelectorAll) return [];
+            return Array.from(root.querySelectorAll(inlineFormatSelector(tagName)));
+        }
+
         function unwrapFormatInBlock(block, tagName) {
-            Array.from(block.querySelectorAll(tagName)).forEach(function (fmt) {
+            queryInlineFormatElements(block, tagName).forEach(function (fmt) {
                 var parent = fmt.parentNode;
                 while (fmt.firstChild) parent.insertBefore(fmt.firstChild, fmt);
                 parent.removeChild(fmt);
             });
             block.normalize();
+        }
+
+        function allBlockTextNodesHaveFormat(doc, block, tagName) {
+            var walker = doc.createTreeWalker(block, NodeFilter.SHOW_TEXT, null);
+            var found = false;
+            var node;
+            while ((node = walker.nextNode())) {
+                if (!normalizeInlineSelectionText(node.nodeValue || '')) continue;
+                found = true;
+                var format = closestInlineFormatElement(node.parentElement, tagName);
+                if (!format || !block.contains(format)) return false;
+            }
+            return found;
+        }
+
+        function toggleWholeBlockInlineFormat(doc, sel, block, tagName) {
+            var removeFormat = allBlockTextNodesHaveFormat(doc, block, tagName);
+
+            // A full-paragraph command always starts from one clean representation.
+            // Thus a partial inner <u>/<em> cannot survive inside the new outer tag.
+            unwrapFormatInBlock(block, tagName);
+            if (!removeFormat) {
+                var wrapper = doc.createElement(tagName);
+                while (block.firstChild) wrapper.appendChild(block.firstChild);
+                block.appendChild(wrapper);
+            }
+
+            removeAdjacentEmptyTextParagraphs(block);
+            sel.removeAllRanges();
+            var newRange = doc.createRange();
+            newRange.selectNodeContents(block);
+            sel.addRange(newRange);
+            rememberDesignSelectionRange(doc.defaultView, doc);
         }
 
         function wrapRangeContentsWithTag(doc, range, tagName) {
@@ -8316,9 +10353,8 @@ if (isset($_GET['action'])) {
 
         function toggleInlineFormat(kind) {
             // Push the current body state BEFORE the change so undo can revert it
-            clearVisualGreenHistory();
             designPushCurrentState();
-            const tagName = kind === 'bold' ? 'strong' : 'em';
+            const tagName = getInlineFormatTagName(kind);
             const info = getDesignSelectionRange();
             if (info && !info.range.collapsed) {
                 const { doc, sel, range } = info;
@@ -8327,12 +10363,62 @@ if (isset($_GET['action'])) {
                     lastDesignSnapshot = getDesignBodyHtml();
                     return;
                 }
+                const wholeSelectionBlock = getWholeSelectionInlineFormattingBlock(doc, range);
+                if (wholeSelectionBlock) {
+                    toggleWholeBlockInlineFormat(doc, sel, wholeSelectionBlock, tagName);
+                    syncFromDesign();
+                    lastDesignSnapshot = getDesignBodyHtml();
+                    return;
+                }
+                const selectedBlocks = getSelectedTextBlocks(doc, range);
+                if (selectedBlocks.length === 1) {
+                    const block = selectedBlocks[0];
+                    const blockRange = makeRangeInsideBlock(doc, range, block);
+                    if (rangeHasText(blockRange)) {
+                        if (selectionCoversWholeBlockText(blockRange, block)) {
+                            toggleWholeBlockInlineFormat(doc, sel, block, tagName);
+                            syncFromDesign();
+                            lastDesignSnapshot = getDesignBodyHtml();
+                            return;
+                        }
+                        const selectedTextInBlock = blockRange.toString();
+                        if (selectedBlockTextNodesHaveFormat(doc, blockRange, tagName)) {
+                            const fmt = closestInlineFormatElement(blockRange.startContainer, tagName);
+                            const endFmt = closestInlineFormatElement(blockRange.endContainer, tagName);
+                            if (fmt && fmt === endFmt && fmt !== block) {
+                                const parent = fmt.parentNode;
+                                while (fmt.firstChild) parent.insertBefore(fmt.firstChild, fmt);
+                                parent.removeChild(fmt);
+                                parent.normalize();
+                                if (selectedTextInBlock) {
+                                    const newRange = findTextRangeInNode(doc, parent, selectedTextInBlock);
+                                    if (newRange) { sel.removeAllRanges(); sel.addRange(newRange); }
+                                }
+                            } else {
+                                unwrapFormatInBlock(block, tagName);
+                                if (selectedTextInBlock) {
+                                    const newRange = findTextRangeInNode(doc, block, selectedTextInBlock);
+                                    if (newRange) { sel.removeAllRanges(); sel.addRange(newRange); }
+                                }
+                            }
+                        } else {
+                            const wrapper = wrapRangeContentsWithTag(doc, blockRange, tagName);
+                            sel.removeAllRanges();
+                            const newRange = doc.createRange();
+                            newRange.selectNodeContents(wrapper);
+                            sel.addRange(newRange);
+                        }
+                        syncFromDesign();
+                        lastDesignSnapshot = getDesignBodyHtml();
+                        return;
+                    }
+                }
                 // Save selected text for re-selection
                 const selectedText = range.toString();
                 let node = range.commonAncestorContainer;
                 if (node.nodeType === 3) node = node.parentElement;
-                let fmt = node && node.closest ? node.closest(tagName) : null;
-                if (fmt && fmt.tagName.toLowerCase() === tagName) {
+                let fmt = closestInlineFormatElement(node, tagName);
+                if (fmt) {
                     // Remove formatting: unwrap the tag but keep selection on original text
                     const parent = fmt.parentNode;
                     // Collect child nodes before unwrapping
@@ -8369,7 +10455,7 @@ if (isset($_GET['action'])) {
                 const el = getDesignSelection();
                 if (!el) return;
                 const doc = el.ownerDocument;
-                const existing = el.querySelector(tagName);
+                const existing = queryInlineFormatElements(el, tagName)[0];
                 if (existing) {
                     const parent = existing.parentNode;
                     while (existing.firstChild) parent.insertBefore(existing.firstChild, existing);
@@ -8381,7 +10467,6 @@ if (isset($_GET['action'])) {
                 }
             }
             syncFromDesign();
-            applyCodeToDesignPanel();
             // Record the post-change state so the next snapshot won't double-push
             lastDesignSnapshot = getDesignBodyHtml();
         }
@@ -8423,7 +10508,6 @@ if (isset($_GET['action'])) {
 
         function applyClassProperty(value) {
             // Push the current body state BEFORE the change so undo can revert it
-            clearVisualGreenHistory();
             designPushCurrentState();
             const info = getDesignSelectionRange();
             if (info && !info.range.collapsed) {
@@ -8435,58 +10519,71 @@ if (isset($_GET['action'])) {
                 // Case 1: selection covers the entire content of a block element
                 // → change the block's class directly instead of wrapping in a span
                 const BLOCK_TAGS = new Set(['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th', 'blockquote', 'pre', 'article', 'section', 'figure', 'header', 'footer', 'main', 'nav']);
+                const BLOCK_SEL = 'p,div,h1,h2,h3,h4,h5,h6,li,td,th,blockquote,pre,article,section,figure,header,footer,main,nav';
+
+                // Determine the block element whose full content is selected.
+                // Two situations produce a "whole line" selection:
+                //   (a) commonAncestorContainer IS the block (selection stays inside it)
+                //   (b) the range spans the entire block from its parent level — e.g. a
+                //       double/triple-click on a paragraph, where commonAncestorContainer
+                //       becomes the parent (body). Without handling (b), the block would be
+                //       wrapped in a <span>, producing invalid <span><p>…</p></span>.
+                let targetBlock = null;
                 if (BLOCK_TAGS.has((ancestor.tagName || '').toLowerCase()) &&
                     selectedText.trim() === ancestor.textContent.trim()) {
-                    if (value && ancestor.classList.contains(value)) {
+                    targetBlock = ancestor;
+                } else {
+                    // Resolve the block sitting at the start of the selection.
+                    let startNode = range.startContainer;
+                    if (startNode.nodeType === 1 && startNode.childNodes[range.startOffset]) {
+                        startNode = startNode.childNodes[range.startOffset];
+                    }
+                    if (startNode && startNode.nodeType === 3) startNode = startNode.parentElement;
+                    let candidate = null;
+                    if (startNode && startNode.nodeType === 1) {
+                        candidate = (startNode.matches && startNode.matches(BLOCK_SEL))
+                            ? startNode
+                            : (startNode.closest ? startNode.closest(BLOCK_SEL) : null);
+                    }
+                    if (candidate && selectedText.trim() === candidate.textContent.trim()) {
+                        targetBlock = candidate;
+                    }
+                }
+
+                if (targetBlock) {
+                    if (value && targetBlock.classList.contains(value)) {
                         // Toggle off: restaurează clasa originală salvată
-                        const origClass = ancestor.getAttribute('data-orig-class');
-                        ancestor.removeAttribute('data-orig-class');
+                        const origClass = targetBlock.getAttribute('data-orig-class');
+                        targetBlock.removeAttribute('data-orig-class');
                         // Default to text_obisnuit if no original class was saved
-                        ancestor.className = origClass || 'text_obisnuit';
+                        targetBlock.className = origClass || 'text_obisnuit';
                     } else if (value) {
                         // Salvează clasa curentă înainte de a aplica text_obisnuit2
-                        if (!ancestor.hasAttribute('data-orig-class')) {
-                            ancestor.setAttribute('data-orig-class', ancestor.className || '');
+                        if (!targetBlock.hasAttribute('data-orig-class')) {
+                            targetBlock.setAttribute('data-orig-class', targetBlock.className || '');
                         }
-                        ancestor.className = value;
+                        targetBlock.className = value;
                         // Unwrap any inner <span> elements that have the same class
                         // (e.g. <span class="text_obisnuit2"> inside <p class="text_obisnuit2">)
-                        const redundantSpans = ancestor.querySelectorAll('span.' + value);
+                        const redundantSpans = targetBlock.querySelectorAll('span.' + value);
                         redundantSpans.forEach(span => {
                             const parent = span.parentNode;
                             while (span.firstChild) parent.insertBefore(span.firstChild, span);
                             parent.removeChild(span);
                         });
-                        ancestor.normalize();
+                        targetBlock.normalize();
                     } else {
-                        ancestor.removeAttribute('class');
-                        ancestor.removeAttribute('data-orig-class');
+                        targetBlock.removeAttribute('class');
+                        targetBlock.removeAttribute('data-orig-class');
                     }
                     syncFromDesign();
                     lastDesignSnapshot = getDesignBodyHtml();
-                    // Force design panel refresh so CSS changes are visible immediately
-                    applyCodeToDesignPanel();
-                    // Re-select the paragraph in design so user can toggle B again
-                    setTimeout(() => {
-                        try {
-                            const iframe = document.getElementById('preview');
-                            const iDoc = iframe.contentDocument;
-                            const iWin = iframe.contentWindow;
-                            if (!iDoc || !iWin) return;
-                            // Find the same paragraph by matching text content
-                            const allBlocks = iDoc.querySelectorAll('p, div, h1, h2, h3, h4, h5, h6, li, td, th, blockquote');
-                            for (const block of allBlocks) {
-                                if (block.textContent.trim() === selectedText.trim()) {
-                                    const r = iDoc.createRange();
-                                    r.selectNodeContents(block);
-                                    const s = iWin.getSelection();
-                                    s.removeAllRanges();
-                                    s.addRange(r);
-                                    break;
-                                }
-                            }
-                        } catch (e) {}
-                    }, 50);
+                    // CSS applies immediately to the live DOM; keep the body and selection intact.
+                    const newRange = doc.createRange();
+                    newRange.selectNodeContents(targetBlock);
+                    sel.removeAllRanges();
+                    sel.addRange(newRange);
+                    rememberDesignSelectionRange(doc.defaultView, doc);
                     return;
                 }
 
@@ -8517,7 +10614,40 @@ if (isset($_GET['action'])) {
                         }
                     }
                 } else if (value) {
-                    // Case 3: partial selection with no existing span → wrap only selected words
+                    // Case 3: no existing span. If the selection fully spans one or more
+                    // block elements, set the class on each block instead of wrapping them
+                    // in a <span> (which would create invalid markup like <span><p>…</p></span>).
+                    const spannedBlocks = [];
+                    doc.querySelectorAll(BLOCK_SEL).forEach(b => {
+                        const bRange = doc.createRange();
+                        bRange.selectNodeContents(b);
+                        if (range.compareBoundaryPoints(Range.START_TO_START, bRange) <= 0 &&
+                            range.compareBoundaryPoints(Range.END_TO_END, bRange) >= 0) {
+                            spannedBlocks.push(b);
+                        }
+                    });
+                    // Ignore ancestor containers that merely wrap the real target blocks
+                    const leafBlocks = spannedBlocks.filter(b =>
+                        !spannedBlocks.some(other => other !== b && b.contains(other)));
+                    if (leafBlocks.length) {
+                        leafBlocks.forEach(b => {
+                            if (!b.hasAttribute('data-orig-class')) {
+                                b.setAttribute('data-orig-class', b.className || '');
+                            }
+                            b.className = value;
+                            b.querySelectorAll('span.' + value).forEach(span => {
+                                const parent = span.parentNode;
+                                while (span.firstChild) parent.insertBefore(span.firstChild, span);
+                                parent.removeChild(span);
+                            });
+                            b.normalize();
+                        });
+                        syncFromDesign();
+                        lastDesignSnapshot = getDesignBodyHtml();
+                        rememberDesignSelectionRange(doc.defaultView, doc);
+                        return;
+                    }
+                    // Partial selection within a single block → wrap only the selected words.
                     // Use Range API (not execCommand) to avoid style="" side-effects
                     try {
                         const newSpan = doc.createElement('span');
@@ -8609,6 +10739,8 @@ if (isset($_GET['action'])) {
                     lastPreviewHadBody: /<body\b/i.test(cnt)
                 });
                 tabs.push(tab);
+                    setTimeout(() => checkArticleIdentity(tab), 0);
+                    scheduleIndexOrderCheck();
                 activeTabId = tab.id;
 
                 currentFile = data.file;
@@ -8628,7 +10760,6 @@ if (isset($_GET['action'])) {
                 isDirty = false;
                 designUndoStack = [];
                 designRedoStack = [];
-                clearVisualGreenHistory();
                 lastDesignSnapshot = null;
 
                 setViewMode('design');
@@ -8686,6 +10817,8 @@ if (isset($_GET['action'])) {
                     lastPreviewHadBody: /<body\b/i.test(content)
                 });
                 tabs.push(tab);
+                    setTimeout(() => checkArticleIdentity(tab), 0);
+                    scheduleIndexOrderCheck();
                 activeTabId = tab.id;
                 var newTabId = tab.id;
 
@@ -8734,6 +10867,8 @@ if (isset($_GET['action'])) {
                             for (var ti = 0; ti < tabs.length; ti++) {
                                 if (tabs[ti].id === newTabId) {
                                     tabs[ti].filePath = resolvedPath;
+                                    const resolvedTab = tabs[ti];
+                                    setTimeout(() => checkArticleIdentity(resolvedTab), 0);
                                     tabs[ti].tabLabel = getTabLabel(editor.getValue(), resolvedPath);
                                     tabs[ti].editorContent = editor.getValue();
                                     refreshTabLinkedCategory(tabs[ti]);
@@ -8782,35 +10917,19 @@ if (isset($_GET['action'])) {
             if (typeof flushPendingDesignSync === 'function') flushPendingDesignSync();
             saveCurrentTabState();
             var hasUnsaved = tabs.some(function (t) { return t.isDirty; }) || isDirty;
+            // Force an immediate backup for this window only (bypass debounce).
+            try {
+                var dirtyTabs = [];
+                for (var i = 0; i < tabs.length; i++) {
+                    if (tabs[i].isDirty && tabs[i].type !== 'browser') {
+                        dirtyTabs.push(makeTabBackup(tabs[i]));
+                    }
+                }
+                replaceOwnedBackups(dirtyTabs);
+            } catch (ex) { }
             if (hasUnsaved) {
-                // Force immediate backup (bypass debounce)
-                try {
-                    var dirtyTabs = [];
-                    for (var i = 0; i < tabs.length; i++) {
-                        if (tabs[i].isDirty) {
-                            dirtyTabs.push({
-                                id: tabs[i].id,
-                                filePath: tabs[i].filePath,
-                                fileName: tabs[i].fileName,
-                                tabLabel: tabs[i].tabLabel,
-                                fullTitle: tabs[i].fullTitle,
-                                editorContent: tabs[i].editorContent,
-                                originalContent: tabs[i].originalContent,
-                                cursorPos: tabs[i].cursorPos,
-                                scrollInfo: tabs[i].scrollInfo,
-                                viewMode: tabs[i].viewMode
-                            });
-                        }
-                    }
-                    if (dirtyTabs.length > 0) {
-                        localStorage.setItem('htmlEditorBackupTabs', JSON.stringify(dirtyTabs));
-                    }
-                } catch (ex) { }
                 e.preventDefault();
                 e.returnValue = '';
-            } else {
-                // No dirty tabs — remove any stale backup from localStorage
-                try { localStorage.removeItem('htmlEditorBackupTabs'); } catch (ex) { }
             }
         });
 
@@ -8836,14 +10955,6 @@ if (isset($_GET['action'])) {
             document.getElementById('pathInput').addEventListener('keydown', e => {
                 if (e.key === 'Enter') { e.preventDefault(); openFromPath(); }
             });
-
-            const btnVisualGreen = document.getElementById('btnVisualGreen');
-            if (btnVisualGreen) {
-                btnVisualGreen.addEventListener('mousedown', e => e.preventDefault());
-                btnVisualGreen.addEventListener('click', () => {
-                    if (!applyVisualGreenShortcut()) showToast('Selecteaza text in Design pentru verde', 'warning');
-                });
-            }
 
             const dz = document.getElementById('dropZone');
             const fp = document.getElementById('filePicker');
@@ -9003,27 +11114,45 @@ if (isset($_GET['action'])) {
             document.getElementById('propFont').addEventListener('change', () => applyFontProperty('fontFamily', document.getElementById('propFont').value));
             document.getElementById('propClass').addEventListener('change', () => applyClassProperty(document.getElementById('propClass').value));
             document.getElementById('propSize').addEventListener('change', () => applyFontProperty('fontSize', document.getElementById('propSize').value));
+            document.getElementById('propBold').addEventListener('mousedown', e => e.preventDefault());
             document.getElementById('propBold').addEventListener('click', () => {
                 toggleInlineFormat('bold');
             });
+            document.getElementById('propItalic').addEventListener('mousedown', e => e.preventDefault());
             document.getElementById('propItalic').addEventListener('click', () => {
                 toggleInlineFormat('italic');
             });
+            const propUnderline = document.getElementById('propUnderline');
+            if (propUnderline) {
+                propUnderline.addEventListener('mousedown', e => e.preventDefault());
+                propUnderline.addEventListener('click', () => {
+                    toggleInlineFormat('underline');
+                });
+            }
             const quickItalicTop = document.getElementById('btnQuickItalic');
             if (quickItalicTop) {
+                quickItalicTop.addEventListener('mousedown', e => e.preventDefault());
                 quickItalicTop.addEventListener('click', () => {
                     toggleInlineFormat('italic');
+                });
+            }
+            const quickUnderlineTop = document.getElementById('btnQuickUnderline');
+            if (quickUnderlineTop) {
+                quickUnderlineTop.addEventListener('mousedown', e => e.preventDefault());
+                quickUnderlineTop.addEventListener('click', () => {
+                    toggleInlineFormat('underline');
                 });
             }
             // Shortcut în topbar: B lângă Redo → aplică clasa text_obisnuit2 pe selecția din Design
             const quickClassBtn = document.getElementById('btnClassObisnuit2');
             if (quickClassBtn) {
+                quickClassBtn.addEventListener('mousedown', e => e.preventDefault());
                 quickClassBtn.addEventListener('click', () => {
                     const targetClass = quickClassBtn.dataset.className || 'text_obisnuit2';
                     applyClassProperty(targetClass);
                     const el = getDesignSelection();
                     if (el) {
-                        const hasClass = (' ' + (el.className || '') + ' ').indexOf(' ' + targetClass + ' ') !== -1;
+                        const hasClass = designSelectionHasCssClass(el, targetClass);
                         quickClassBtn.classList.toggle('active', hasClass);
                     }
                 });
@@ -9038,6 +11167,49 @@ if (isset($_GET['action'])) {
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('sw.js').catch(function () { });
         }
+
+        // ── Avertisment: editorul (acest fisier) s-a schimbat pe disc → trebuie reincarcat ──
+        // Pagina isi tine minte versiunea (data modificarii fisierului) de la incarcare si
+        // intreaba serverul la 20 s si la revenirea in fereastra daca a aparut una mai noua.
+        (function () {
+            var loadedVersion = <?php echo json_encode((string) filemtime(__FILE__)); ?>;
+            var bannerShown = false;
+            function showUpdateBanner() {
+                if (bannerShown) return;
+                bannerShown = true;
+                var bar = document.createElement('div');
+                bar.id = 'editorUpdateBanner';
+                bar.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:100001;' +
+                    'background:#1f2937;border:2px solid #facc15;border-radius:8px;padding:10px 16px;' +
+                    'display:flex;align-items:center;gap:14px;color:#eee;font-size:16px;box-shadow:0 6px 24px rgba(0,0,0,.5)';
+                bar.innerHTML =
+                    '<span><i class="fas fa-sync-alt" style="color:#facc15"></i> ' +
+                    'Editorul a fost actualizat. Reîncarcă pagina ca să folosești versiunea nouă.</span>' +
+                    '<button class="btn btn-primary" id="editorUpdateReload">Reîncarcă acum</button>' +
+                    '<button class="btn btn-ghost" id="editorUpdateLater">Mai târziu</button>';
+                document.body.appendChild(bar);
+                document.getElementById('editorUpdateReload').onclick = function () { location.reload(); };
+                document.getElementById('editorUpdateLater').onclick = function () {
+                    bar.remove();
+                    // reapare peste 5 minute daca tot n-a fost reincarcat
+                    setTimeout(function () { bannerShown = false; checkVersion(); }, 5 * 60 * 1000);
+                };
+            }
+            function checkVersion() {
+                if (bannerShown) return;
+                fetch('?action=version', { cache: 'no-store' })
+                    .then(function (r) { return r.json(); })
+                    .then(function (d) {
+                        if (d && d.ok && String(d.v) !== String(loadedVersion)) showUpdateBanner();
+                    })
+                    .catch(function () { });
+            }
+            setInterval(checkVersion, 20000);
+            window.addEventListener('focus', checkVersion);
+            document.addEventListener('visibilitychange', function () {
+                if (document.visibilityState === 'visible') checkVersion();
+            });
+        })();
     </script>
 </body>
 
