@@ -260,6 +260,62 @@ function scan_category_links_cached($dir)
     return $out;
 }
 
+/**
+ * Sortează lista de articole dintr-o pagină de categorie / index după dată (nou → vechi, stabil).
+ * Blocul = 2× <table> + <p class="text_obisnuit2"> + <p class="text_obisnuit"></p> (ca în editor).
+ * Fiecare bloc ia locul unui bloc din listă; spațiile dintre blocuri și restul fișierului rămân.
+ * Întoarce textul nou sau null dacă lista e deja în ordine / nu există.
+ */
+function sort_list_blocks_by_date_php($html)
+{
+    $months = ['ianuarie' => 1, 'februarie' => 2, 'martie' => 3, 'aprilie' => 4, 'mai' => 5, 'iunie' => 6,
+        'iulie' => 7, 'august' => 8, 'septembrie' => 9, 'octombrie' => 10, 'noiembrie' => 11, 'decembrie' => 12,
+        'january' => 1, 'february' => 2, 'march' => 3, 'april' => 4, 'may' => 5, 'june' => 6,
+        'july' => 7, 'september' => 9, 'october' => 10, 'november' => 11, 'december' => 12];
+    $start = false;
+    $endMarkers = [];
+    foreach ([['<!-- ARTICOL CATEGORIE START -->', ['<!-- ARTICOL CATEGORIE FINAL -->']],
+              ['<!-- ARTICOL START -->', ['<!-- SASA-1 -->', '<!-- ARTICOL FINAL -->']]] as $pair) {
+        $i = strpos($html, $pair[0]);
+        if ($i !== false) { $start = $i + strlen($pair[0]); $endMarkers = $pair[1]; break; }
+    }
+    if ($start === false || !preg_match('/\G\s*<div\s+align\s*=\s*["\']?justify["\']?\s*>/i', $html, $dm, 0, $start)) return null;
+    $pos = $start + strlen($dm[0]);
+    $end = strlen($html);
+    foreach ($endMarkers as $em) {
+        $e = strpos($html, $em, $pos);
+        if ($e !== false && $e < $end) $end = $e;
+    }
+    $re = '/\G(\s*)(<table\s[^>]*\bwidth\s*=\s*["\'][^"\']+["\'][^>]*>.*?<\/table>\s*<p\s+class\s*=\s*["\']text_obisnuit2["\'][^>]*>.*?<\/p>\s*'
+        . '<table\s[^>]*\bwidth\s*=\s*["\'][^"\']+["\'][^>]*>.*?<\/table>\s*<p\s+class\s*=\s*["\']text_obisnuit["\'][^>]*>\s*<\/p>)/is';
+    $blocks = [];
+    while ($pos < $end && preg_match($re, $html, $m, PREG_OFFSET_CAPTURE, $pos) && $m[0][1] + strlen($m[0][0]) <= $end) {
+        $body = $m[2][0];
+        $ts = 0;
+        if (preg_match('/class\s*=\s*["\'][^"\']*\btext_dreapta\b[^"\']*["\'][^>]*>(.*?)<\/td>/is', $body, $td) &&
+            preg_match('/\bOn\s+([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})/', $td[1], $d) && isset($months[strtolower($d[1])]) &&
+            checkdate($months[strtolower($d[1])], (int) $d[2], (int) $d[3])) {
+            $ts = (int) sprintf('%04d%02d%02d', (int) $d[3], $months[strtolower($d[1])], (int) $d[2]);
+        }
+        $blocks[] = ['start' => $m[2][1], 'end' => $m[2][1] + strlen($body), 'body' => $body, 'ts' => $ts];
+        $pos = $m[0][1] + strlen($m[0][0]);
+    }
+    if (count($blocks) < 2) return null;
+    $order = array_keys($blocks);
+    usort($order, function ($a, $b) use ($blocks) {
+        if ($blocks[$a]['ts'] !== $blocks[$b]['ts']) return $blocks[$b]['ts'] - $blocks[$a]['ts'];
+        return $a - $b; // stabil
+    });
+    if ($order === array_keys($blocks)) return null;
+    $out = '';
+    $last = 0;
+    foreach ($blocks as $k => $slot) {
+        $out .= substr($html, $last, $slot['start'] - $last) . $blocks[$order[$k]]['body'];
+        $last = $slot['end'];
+    }
+    return $out . substr($html, $last);
+}
+
 /** Remove stray </span> tags that have no matching opening <span> inside a text paragraph. */
 function remove_orphan_closing_spans_from_paragraphs_php($html)
 {
@@ -1172,13 +1228,42 @@ if (isset($_GET['action'])) {
         }
         $at = $tm[2][1] + $dm[0][1];
         $new = substr($raw, 0, $at) . $to . substr($raw, $at + strlen($dm[0][0]));
+        // În categorie / index: blocul cu data nouă trebuie să ajungă la locul lui în listă
+        $sortedFlag = false;
+        if ($mode === 'list') {
+            $sorted = sort_list_blocks_by_date_php($new);
+            if ($sorted !== null && strlen($sorted) === strlen($new)) { $new = $sorted; $sortedFlag = true; }
+        }
         $backupPath = create_pre_save_backup($full);
         if (@file_put_contents($full, $new, LOCK_EX) !== strlen($new)) {
             if ($backupPath && is_file($backupPath)) @copy($backupPath, $full);
             echo json_encode(['ok' => false, 'error' => 'Scriere incompleta; fisierul anterior a fost restaurat.']);
             exit;
         }
-        echo json_encode(['ok' => true, 'changed' => true, 'from' => $dm[0][0]], JSON_UNESCAPED_UNICODE);
+        echo json_encode(['ok' => true, 'changed' => true, 'from' => $dm[0][0], 'sorted' => $sortedFlag], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    // Sortează după dată lista de articole a unei pagini de categorie / index (fără alte schimbări)
+    if ($action === 'sortListByDate' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $full = resolve_path(isset($_POST['file']) ? $_POST['file'] : '', $ROOT);
+        if (!is_file($full)) {
+            echo json_encode(['ok' => false, 'error' => 'Fisier lipsa: ' . $full], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        $raw = file_get_contents($full);
+        $sorted = sort_list_blocks_by_date_php($raw);
+        if ($sorted === null || strlen($sorted) !== strlen($raw)) {
+            echo json_encode(['ok' => true, 'changed' => false]);
+            exit;
+        }
+        $backupPath = create_pre_save_backup($full);
+        if (@file_put_contents($full, $sorted, LOCK_EX) !== strlen($sorted)) {
+            if ($backupPath && is_file($backupPath)) @copy($backupPath, $full);
+            echo json_encode(['ok' => false, 'error' => 'Scriere incompleta; fisierul anterior a fost restaurat.']);
+            exit;
+        }
+        echo json_encode(['ok' => true, 'changed' => true]);
         exit;
     }
 
@@ -5334,6 +5419,18 @@ if (isset($_GET['action'])) {
             const isIndex = /\/index\.html?$/i.test(String(listPath).replace(/\\/g, '/'));
             const updated = [];
 
+            // Lista salvată (categoria / index-ul deschis): blocurile cu data schimbată la locul lor
+            try {
+                const apiBase = window.location.pathname.replace(/[#?].*$/, '');
+                const body = new URLSearchParams();
+                body.append('file', listPath);
+                const s = await (await fetch(apiBase + '?action=sortListByDate', { method: 'POST', body })).json();
+                if (s && s.ok && s.changed) {
+                    await dateSyncRefreshTab(listPath);
+                    toast('Am pus articolele din listă în ordinea datelor.');
+                }
+            } catch (e) { console.error(e); }
+
             for (const ch of changes) {
                 const name = ch.key.split('/').pop();
                 const articlePath = dir + '/' + name;
@@ -5400,7 +5497,12 @@ if (isset($_GET['action'])) {
             let d = null;
             try { d = await (await fetch(apiBase + '?action=replaceArticleDate', { method: 'POST', body })).json(); } catch (e) { return false; }
             if (!d || !d.ok || !d.changed) return false;
-            // Dacă fișierul e deschis într-un tab nemodificat, îl reîncarcă
+            await dateSyncRefreshTab(path);
+            return true;
+        }
+
+        // Fișierul a fost schimbat pe disc: dacă e deschis într-un tab nemodificat, îl reîncarcă
+        async function dateSyncRefreshTab(path) {
             const t = findTabByPath(path);
             if (t && !t.isDirty) {
                 const html = await dateSyncLoad(path);
