@@ -154,6 +154,112 @@ function create_pre_save_backup($full)
     return $backupPath;
 }
 
+/**
+ * Data „On Luna zi, an” de sub <h1 class="den_articol"> pentru fiecare articol din $dir
+ * (ro/ sau en/). Paginile de categorii/index nu au <h1 den_articol>, deci sunt ignorate.
+ * Cache in folderul temp: un fisier e recitit doar daca i s-a schimbat data modificarii.
+ * Intoarce [file, ts, date, mtime, cat (link categorie), catName].
+ */
+function scan_article_dates_cached($dir)
+{
+    $months = ['ianuarie' => 1, 'februarie' => 2, 'martie' => 3, 'aprilie' => 4, 'mai' => 5, 'iunie' => 6,
+        'iulie' => 7, 'august' => 8, 'septembrie' => 9, 'octombrie' => 10, 'noiembrie' => 11, 'decembrie' => 12,
+        'january' => 1, 'february' => 2, 'march' => 3, 'april' => 4, 'may' => 5, 'june' => 6,
+        'july' => 7, 'september' => 9, 'october' => 10, 'november' => 11, 'december' => 12];
+    $cacheFile = sys_get_temp_dir() . '/htmleditor_article_dates_v2_' . md5(strtolower($dir)) . '.json';
+    $cache = [];
+    if (is_file($cacheFile)) {
+        $tmp = json_decode((string) @file_get_contents($cacheFile), true);
+        if (is_array($tmp)) $cache = $tmp;
+    }
+    $newCache = [];
+    $list = [];
+    foreach ((array) @scandir($dir) as $name) {
+        if (!preg_match('/\.html?$/i', $name)) continue;
+        $path = $dir . '/' . $name;
+        $mtime = @filemtime($path);
+        if ($mtime === false) continue;
+        if (isset($cache[$name]) && $cache[$name]['m'] === $mtime) {
+            $entry = $cache[$name];
+        } else {
+            $entry = ['m' => $mtime, 't' => null, 'd' => '', 'c' => '', 'cn' => ''];
+            $head = @file_get_contents($path, false, null, 0, 120000);
+            if ($head !== false &&
+                preg_match('/<h1\b[^>]*class\s*=\s*["\'][^"\']*\bden_articol\b/i', $head, $hm, PREG_OFFSET_CAPTURE) &&
+                preg_match('/class\s*=\s*["\'][^"\']*\btext_dreapta\b[^"\']*["\'][^>]*>(.*?)<\/td>/is', substr($head, $hm[0][1]), $td)) {
+                $plain = trim(preg_replace('/\s+/u', ' ', str_ireplace(['&nbsp;', '&#160;'], ' ', strip_tags($td[1]))));
+                if (preg_match('/\bOn\s+([^\s\d,]+)\s+(\d{1,2}),?\s+(\d{4})\b/iu', $plain, $dm)) {
+                    $mon = strtolower($dm[1]);
+                    if (isset($months[$mon]) && checkdate($months[$mon], (int) $dm[2], (int) $dm[3])) {
+                        $entry['t'] = mktime(0, 0, 0, $months[$mon], (int) $dm[2], (int) $dm[3]);
+                        $entry['d'] = $dm[0];
+                    }
+                }
+                if (preg_match('/<a\b[^>]*\bhref\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)<\/a>/is', $td[1], $am)) {
+                    $entry['c'] = $am[1];
+                    $entry['cn'] = trim(html_entity_decode(strip_tags($am[2]), ENT_QUOTES, 'UTF-8'));
+                }
+            }
+        }
+        $newCache[$name] = $entry;
+        if ($entry['t'] !== null) {
+            $list[] = ['file' => $path, 'ts' => $entry['t'], 'date' => $entry['d'], 'mtime' => $mtime,
+                'cat' => isset($entry['c']) ? $entry['c'] : '', 'catName' => isset($entry['cn']) ? $entry['cn'] : ''];
+        }
+    }
+    @file_put_contents($cacheFile, json_encode($newCache));
+    return $list;
+}
+
+/**
+ * Linkurile spre articole (a.linkMare) din fiecare pagină de categorie din $dir
+ * (zona <!-- ARTICOL CATEGORIE START --> … FINAL). Articolele și index.html sunt ignorate.
+ * Cache pe data modificării. Întoarce [file, title, links: [[name, text], …]].
+ */
+function scan_category_links_cached($dir)
+{
+    $cacheFile = sys_get_temp_dir() . '/htmleditor_category_links_v1_' . md5(strtolower($dir)) . '.json';
+    $cache = [];
+    if (is_file($cacheFile)) {
+        $tmp = json_decode((string) @file_get_contents($cacheFile), true);
+        if (is_array($tmp)) $cache = $tmp;
+    }
+    $newCache = [];
+    $out = [];
+    foreach ((array) @scandir($dir) as $name) {
+        if (!preg_match('/\.html?$/i', $name) || preg_match('/^index\.html?$/i', $name)) continue;
+        $path = $dir . '/' . $name;
+        $mtime = @filemtime($path);
+        if ($mtime === false) continue;
+        if (isset($cache[$name]) && $cache[$name]['m'] === $mtime) {
+            $entry = $cache[$name];
+        } else {
+            $entry = ['m' => $mtime, 'c' => false, 't' => '', 'l' => []];
+            $html = @file_get_contents($path);
+            $s = $html === false ? false : strpos($html, '<!-- ARTICOL CATEGORIE START -->');
+            if ($s !== false && !preg_match('/<h1\b[^>]*class\s*=\s*["\'][^"\']*\bden_articol\b/i', $html)) {
+                $e = strpos($html, '<!-- ARTICOL CATEGORIE FINAL -->', $s);
+                $region = substr($html, $s, ($e === false ? strlen($html) : $e) - $s);
+                $entry['c'] = true;
+                if (preg_match('/<title>(.*?)<\/title>/is', $html, $tm)) {
+                    $entry['t'] = trim(html_entity_decode(strip_tags($tm[1]), ENT_QUOTES, 'UTF-8'));
+                }
+                if (preg_match_all('/<a\b([^>]*\bclass\s*=\s*["\'][^"\']*\blinkMare\b[^>]*)>(.*?)<\/a>/is', $region, $am, PREG_SET_ORDER)) {
+                    foreach ($am as $a) {
+                        if (!preg_match('/\bhref\s*=\s*["\']([^"\']+)["\']/i', $a[1], $hm)) continue;
+                        $href = preg_replace('/[#?].*$/', '', $hm[1]);
+                        $entry['l'][] = [strtolower(basename($href)), trim(html_entity_decode(strip_tags($a[2]), ENT_QUOTES, 'UTF-8'))];
+                    }
+                }
+            }
+        }
+        $newCache[$name] = $entry;
+        if (!empty($entry['c'])) $out[] = ['file' => $path, 'title' => $entry['t'], 'links' => $entry['l']];
+    }
+    @file_put_contents($cacheFile, json_encode($newCache));
+    return $out;
+}
+
 /** Remove stray </span> tags that have no matching opening <span> inside a text paragraph. */
 function remove_orphan_closing_spans_from_paragraphs_php($html)
 {
@@ -803,6 +909,42 @@ if (isset($_GET['action'])) {
     // Cele mai noi N articole dintr-un folder (ro/ sau en/), dupa data „On Luna zi, an” de sub <h1 class="den_articol">.
     // Paginile de categorii/index nu au <h1 den_articol>, deci sunt ignorate.
     // Cache in folderul temp: un fisier e recitit doar daca i s-a schimbat data modificarii.
+    // Datele tuturor articolelor dintr-un folder (pentru verificarea datelor duplicate).
+    // Intoarce: file, ts (miezul noptii, ora locala), date („On Martie 17, 2009”), cat/catName (categoria).
+    if ($action === 'articleDates') {
+        $dir = rtrim(resolve_path(isset($_GET['dir']) ? $_GET['dir'] : '', $ROOT), '/');
+        @set_time_limit(300);
+        if ($dir === '' || !is_dir($dir)) {
+            echo json_encode(['ok' => false, 'error' => 'Folderul nu exista: ' . $dir], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        // listed = articolul apare într-o pagină de categorie (paginile site-ului — contact,
+        // newsletter, termeni… — nu apar și nu contează la datele duplicate)
+        $listed = [];
+        foreach (scan_category_links_cached($dir) as $c) {
+            foreach ($c['links'] as $l) $listed[$l[0]] = true;
+        }
+        $out = [];
+        foreach (scan_article_dates_cached($dir) as $a) {
+            $out[] = ['file' => $a['file'], 'ts' => $a['ts'], 'date' => $a['date'], 'cat' => $a['cat'], 'catName' => $a['catName'],
+                'listed' => isset($listed[strtolower(basename($a['file']))])];
+        }
+        echo json_encode(['ok' => true, 'dir' => $dir, 'today' => mktime(0, 0, 0), 'articles' => $out], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    // Linkurile din paginile de categorie (pentru fereastra Link-Duble)
+    if ($action === 'categoryLinks') {
+        $dir = rtrim(resolve_path(isset($_GET['dir']) ? $_GET['dir'] : '', $ROOT), '/');
+        @set_time_limit(300);
+        if ($dir === '' || !is_dir($dir)) {
+            echo json_encode(['ok' => false, 'error' => 'Folderul nu exista: ' . $dir], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        echo json_encode(['ok' => true, 'dir' => $dir, 'categories' => scan_category_links_cached($dir)], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
     if ($action === 'recentArticles') {
         $dir = rtrim(resolve_path(isset($_GET['dir']) ? $_GET['dir'] : '', $ROOT), '/');
         $limit = max(1, min(10, (int) (isset($_GET['n']) ? $_GET['n'] : 2)));
@@ -811,47 +953,7 @@ if (isset($_GET['action'])) {
             echo json_encode(['ok' => false, 'error' => 'Folderul nu exista: ' . $dir], JSON_UNESCAPED_UNICODE);
             exit;
         }
-        $months = ['ianuarie' => 1, 'februarie' => 2, 'martie' => 3, 'aprilie' => 4, 'mai' => 5, 'iunie' => 6,
-            'iulie' => 7, 'august' => 8, 'septembrie' => 9, 'octombrie' => 10, 'noiembrie' => 11, 'decembrie' => 12,
-            'january' => 1, 'february' => 2, 'march' => 3, 'april' => 4, 'may' => 5, 'june' => 6,
-            'july' => 7, 'september' => 9, 'october' => 10, 'november' => 11, 'december' => 12];
-        $cacheFile = sys_get_temp_dir() . '/htmleditor_article_dates_' . md5(strtolower($dir)) . '.json';
-        $cache = [];
-        if (is_file($cacheFile)) {
-            $tmp = json_decode((string) @file_get_contents($cacheFile), true);
-            if (is_array($tmp)) $cache = $tmp;
-        }
-        $newCache = [];
-        $list = [];
-        foreach ((array) @scandir($dir) as $name) {
-            if (!preg_match('/\.html?$/i', $name)) continue;
-            $path = $dir . '/' . $name;
-            $mtime = @filemtime($path);
-            if ($mtime === false) continue;
-            if (isset($cache[$name]) && $cache[$name]['m'] === $mtime) {
-                $entry = $cache[$name];
-            } else {
-                $entry = ['m' => $mtime, 't' => null, 'd' => ''];
-                $head = @file_get_contents($path, false, null, 0, 120000);
-                if ($head !== false &&
-                    preg_match('/<h1\b[^>]*class\s*=\s*["\'][^"\']*\bden_articol\b/i', $head, $hm, PREG_OFFSET_CAPTURE) &&
-                    preg_match('/class\s*=\s*["\'][^"\']*\btext_dreapta\b[^"\']*["\'][^>]*>(.*?)<\/td>/is', substr($head, $hm[0][1]), $td)) {
-                    $plain = trim(preg_replace('/\s+/u', ' ', str_ireplace(['&nbsp;', '&#160;'], ' ', strip_tags($td[1]))));
-                    if (preg_match('/\bOn\s+([^\s\d,]+)\s+(\d{1,2}),?\s+(\d{4})\b/iu', $plain, $dm)) {
-                        $mon = strtolower($dm[1]);
-                        if (isset($months[$mon]) && checkdate($months[$mon], (int) $dm[2], (int) $dm[3])) {
-                            $entry['t'] = mktime(0, 0, 0, $months[$mon], (int) $dm[2], (int) $dm[3]);
-                            $entry['d'] = $dm[0];
-                        }
-                    }
-                }
-            }
-            $newCache[$name] = $entry;
-            if ($entry['t'] !== null) {
-                $list[] = ['file' => $path, 'ts' => $entry['t'], 'date' => $entry['d'], 'mtime' => $mtime];
-            }
-        }
-        @file_put_contents($cacheFile, json_encode($newCache));
+        $list = scan_article_dates_cached($dir);
         usort($list, function ($a, $b) {
             if ($a['ts'] !== $b['ts']) return $b['ts'] - $a['ts'];
             return $b['mtime'] - $a['mtime'];
@@ -1022,6 +1124,61 @@ if (isset($_GET['action'])) {
             exit;
         }
         echo json_encode(['ok' => true, 'file' => $full, 'content' => $txt], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    // Schimbă DOAR data „On Luna zi, an” dintr-un fișier, fără nicio altă modificare
+    // (folosit la sincronizarea datei articol ↔ categorie ↔ en). Face backup ca la save.
+    //  mode=article: data de sub <h1 class="den_articol">
+    //  mode=list&name=x.html: data din blocul articolului x.html într-o pagină de categorie / index
+    if ($action === 'replaceArticleDate' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $full = resolve_path(isset($_POST['file']) ? $_POST['file'] : '', $ROOT);
+        $mode = isset($_POST['mode']) ? $_POST['mode'] : 'article';
+        $name = isset($_POST['name']) ? basename(str_replace('\\', '/', $_POST['name'])) : '';
+        $to = isset($_POST['to']) ? trim($_POST['to']) : '';
+        if (!is_file($full) || !preg_match('/^On [A-Za-z]+ \d{1,2}, \d{4}$/', $to)) {
+            echo json_encode(['ok' => false, 'error' => 'Parametri invalizi sau fisier lipsa: ' . $full], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        // expect = data veche (opțional): în listă, alege blocul care o are, nu primul link găsit
+        $expect = isset($_POST['expect']) ? preg_replace('/\s+/', ' ', trim($_POST['expect'])) : '';
+        $raw = file_get_contents($full);
+        $starts = [];
+        if ($mode === 'list') {
+            if ($name !== '' && preg_match_all('/href\s*=\s*["\'](?:[^"\']*\/)?' . preg_quote($name, '/') . '["\']/i', $raw, $lm, PREG_OFFSET_CAPTURE)) {
+                foreach ($lm[0] as $hit) $starts[] = $hit[1];
+            }
+        } elseif (preg_match('/<h1\b[^>]*class\s*=\s*["\'][^"\']*\bden_articol\b/i', $raw, $hm, PREG_OFFSET_CAPTURE)) {
+            $starts[] = $hm[0][1];
+        }
+        $tm = null;
+        $dm = null;
+        foreach ($starts as $start) {
+            if (!preg_match('/(class\s*=\s*["\'][^"\']*\btext_dreapta\b[^"\']*["\'][^>]*>)(.*?)(<\/td>)/is', $raw, $t, PREG_OFFSET_CAPTURE, $start)) continue;
+            if ($t[0][1] - $start > 6000) continue;
+            if (!preg_match('/\bOn\s+[^\s\d,<]+\s+\d{1,2},?\s+\d{4}/i', $t[2][0], $d, PREG_OFFSET_CAPTURE)) continue;
+            if ($expect !== '' && preg_replace('/\s+/', ' ', $d[0][0]) !== $expect && $d[0][0] !== $to) continue;
+            $tm = $t;
+            $dm = $d;
+            break;
+        }
+        if ($tm === null) {
+            echo json_encode(['ok' => true, 'changed' => false, 'reason' => 'Nu am gasit data']);
+            exit;
+        }
+        if ($dm[0][0] === $to) {
+            echo json_encode(['ok' => true, 'changed' => false]);
+            exit;
+        }
+        $at = $tm[2][1] + $dm[0][1];
+        $new = substr($raw, 0, $at) . $to . substr($raw, $at + strlen($dm[0][0]));
+        $backupPath = create_pre_save_backup($full);
+        if (@file_put_contents($full, $new, LOCK_EX) !== strlen($new)) {
+            if ($backupPath && is_file($backupPath)) @copy($backupPath, $full);
+            echo json_encode(['ok' => false, 'error' => 'Scriere incompleta; fisierul anterior a fost restaurat.']);
+            exit;
+        }
+        echo json_encode(['ok' => true, 'changed' => true, 'from' => $dm[0][0]], JSON_UNESCAPED_UNICODE);
         exit;
     }
 
@@ -2259,6 +2416,12 @@ if (isset($_GET['action'])) {
                 <button class="btn" id="btnSendArticleEmail" onclick="sendLatestArticleEmail()"
                     title="Trimite pe email ultimul articol din ro/index.html (ruleaza monitor_index.py in fundal)"
                     style="background:#16a34a;color:#fff;border-color:#15803d"><i class="fas fa-envelope"></i> Trimite E-mail</button>
+                <button class="btn" id="btnDateDuble" onclick="openDateDuplicatesFromStart()"
+                    title="Arată articolele din ro/ și en/ care au aceeași dată"
+                    style="background:#dc2626;color:#fff;border-color:#b91c1c"><i class="fas fa-calendar-times"></i> Date-Duble</button>
+                <button class="btn" id="btnLinkDuble" onclick="runLinkDuplicateCheck()"
+                    title="Arată articolele care apar de 2+ ori în paginile de categorie din ro/ sau en/"
+                    style="background:#7c3aed;color:#fff;border-color:#6d28d9"><i class="fas fa-link"></i> Link-Duble</button>
                 <button class="btn btn-primary" onclick="openNewFromModel()" title="Deschide model.html">NEW</button>
                 <button class="btn btn-ghost" onclick="continueToEditor()">Continua la editor</button>
             </div>
@@ -2339,8 +2502,10 @@ if (isset($_GET['action'])) {
                         Undo</button>
                     <button type="button" id="btnRedo" onclick="doRedoFromDesign()" title="Redo (Ctrl+Y)">&#8631;
                         Redo</button>
+                    <button type="button" id="btnClassNormal" class="btn btn-ghost"
+                        title="Normal: paragraful cu cursorul devine &lt;p class=&quot;text_obisnuit&quot;&gt; (scoate toate stilurile)">N</button>
                     <button type="button" id="btnClassObisnuit2" class="btn btn-ghost"
-                        title="Aplică clasa text_obisnuit2 pe selecția din Design">B</button>
+                        title="Bold: paragraful cu cursorul devine &lt;p class=&quot;text_obisnuit2&quot;&gt;; încă un click îl readuce la Normal">B</button>
                     <button type="button" id="btnQuickItalic" class="btn btn-ghost"
                         title="Italic (&lt;em&gt;) pe selecția din Design (ca butonul I de jos)">I</button>
                     <button type="button" id="btnQuickUnderline" class="btn btn-ghost"
@@ -2970,6 +3135,11 @@ if (isset($_GET['action'])) {
             editor.setCursor(tab.cursorPos);
             isSyncFromDesign = false;
             _isRestoringTab = false;
+            // Tab-uri deschise înainte (sau restaurate din backup) cu stil AI → rescrise acum
+            if (typeof cleanAiStyleInOpenedTab === 'function') {
+                const aiFixedTab = cleanAiStyleInOpenedTab(tab, tab.filePath || tab.fileName);
+                if (aiFixedTab) markTabDirtyAfterAiCleanup(tab, aiFixedTab);
+            }
 
             // Restore view mode
             setViewMode(tab.viewMode);
@@ -5112,6 +5282,177 @@ if (isset($_GET['action'])) {
             }
         }
 
+        // ── Data schimbată într-o pagină de categorie (sau index.html) → se schimbă și în articol ──
+        // La Save pe o pagină-listă: compară data fiecărui articol din listă cu versiunea salvată
+        // anterior. Unde s-a schimbat, scrie data nouă în articol și în cealaltă listă
+        // (categorie ↔ index), fără să schimbe altceva în acele fișiere.
+        const LIST_DATE_RE = /\bOn\s+[^\s\d,<]+\s+\d{1,2},?\s+\d{4}/i;
+
+        function listBlockDateText(blockHtml) {
+            const td = /class\s*=\s*["'][^"']*\btext_dreapta\b[^"']*["'][^>]*>([\s\S]*?)<\/td>/i.exec(blockHtml || '');
+            if (!td) return null;
+            const m = LIST_DATE_RE.exec(td[1]);
+            return m ? m[0] : null;
+        }
+
+        // Înlocuiește data din primul <td class="text_dreapta"> de după `fromIdx`
+        function replaceTextDreaptaDate(html, fromIdx, newDate) {
+            const re = /(class\s*=\s*["'][^"']*\btext_dreapta\b[^"']*["'][^>]*>)([\s\S]*?)(<\/td>)/i;
+            const slice = html.slice(fromIdx);
+            const m = re.exec(slice);
+            if (!m || !LIST_DATE_RE.test(m[2])) return null;
+            const inner = m[2].replace(LIST_DATE_RE, newDate);
+            if (inner === m[2]) return null;
+            const at = fromIdx + m.index + m[1].length;
+            return html.slice(0, at) + inner + html.slice(at + m[2].length);
+        }
+
+        function listDateMap(html) {
+            const map = new Map();
+            const r = findCategoryListRegion(html);
+            if (!r.ok) return map;
+            enumerateIndexCategoryBlocks(html, r.divEndGlobal, r.regionEnd).forEach(b => {
+                const d = listBlockDateText(b.block);
+                if (b.key && d && !map.has(b.key)) map.set(b.key, d);
+            });
+            return map;
+        }
+
+        async function syncListDatesToArticlesAfterSave(listPath, oldHtml, newHtml) {
+            if (!listPath || !oldHtml || !newHtml || !isHtmlCategoryListingPage(newHtml)) return;
+            const before = listDateMap(oldHtml);
+            const after = listDateMap(newHtml);
+            const changes = [];
+            after.forEach((d, key) => {
+                const old = before.get(key);
+                if (old && old.replace(/\s+/g, ' ') !== d.replace(/\s+/g, ' ') && parseCategoryArticleLineDate('<td class="text_dreapta">' + d + '</td>') !== null) {
+                    changes.push({ key, date: d });
+                }
+            });
+            if (!changes.length) return;
+            const dir = String(listPath).replace(/\\/g, '/').replace(/\/[^\/]*$/, '');
+            const isIndex = /\/index\.html?$/i.test(String(listPath).replace(/\\/g, '/'));
+            const updated = [];
+
+            for (const ch of changes) {
+                const name = ch.key.split('/').pop();
+                const articlePath = dir + '/' + name;
+                const oldDate = before.get(ch.key);
+                try {
+                    // 1) articolul (doar data se schimbă)
+                    if (await dateSyncReplace(articlePath, 'article', '', ch.date, '')) updated.push(name);
+                    // 2) cealaltă listă: index ↔ categorie
+                    let otherPath = '';
+                    if (isIndex) {
+                        const art = await dateSyncLoad(articlePath);
+                        const h = art ? art.search(/<h1\b[^>]*class\s*=\s*["'][^"']*\bden_articol\b/i) : -1;
+                        const catLink = h !== -1 ? /class\s*=\s*["'][^"']*\btext_dreapta\b[^"']*["'][^>]*>[\s\S]*?<a\b[^>]*\bhref\s*=\s*["']([^"']+)["']/i.exec(art.slice(h)) : null;
+                        if (catLink) otherPath = dir + '/' + catLink[1].split('#')[0].split('?')[0].split('/').pop();
+                    } else {
+                        otherPath = dir + '/index.html';
+                    }
+                    if (otherPath && normPathLoose(otherPath) !== normPathLoose(listPath) &&
+                        await dateSyncReplace(otherPath, 'list', name, ch.date, oldDate)) {
+                        updated.push(otherPath.split('/').pop());
+                    }
+                } catch (e) {
+                    console.error(e);
+                }
+            }
+            if (updated.length) {
+                toast('Data schimbată a fost scrisă și în: ' + Array.from(new Set(updated)).join(', '));
+                scheduleRecentArticlesCheck(2000);
+            }
+            // Articolele ro modificate → și traducerile lor din en/
+            if (/\/ro$/i.test(dir)) {
+                for (const ch of changes) {
+                    const articlePath = dir + '/' + ch.key.split('/').pop();
+                    try {
+                        const art = await dateSyncLoad(articlePath);
+                        if (art !== null) await syncDateToEnglishCounterpart(articlePath, art);
+                    } catch (e) { console.error(e); }
+                }
+            }
+        }
+
+        // ── Data unui articol din ro/ → și în articolul analog din en/ ──
+        // Analogul e linkul https://neculaifantanaru.com/en/… din secțiunea FLAGS a articolului ro.
+        // Se actualizează: articolul en, blocul lui din categoria en și din en/index.html (dacă există).
+        // Dacă traducerea nu există încă în en/, nu se face nimic.
+        async function dateSyncLoad(p) {
+            const apiBase = window.location.pathname.replace(/[#?].*$/, '');
+            try {
+                const d = await (await fetch(apiBase + '?action=load&file=' + encodeURIComponent(p), { cache: 'no-store' })).json();
+                return d && d.ok ? (d.content || '') : null;
+            } catch (e) { return null; }
+        }
+        // Schimbă DOAR data în fișier (pe server, fără alte curățări). true = s-a schimbat.
+        //  mode 'article' → data de sub h1; mode 'list' + name → blocul articolului `name`
+        //  expect = data veche din listă (alege blocul corect dacă articolul apare de mai multe ori)
+        async function dateSyncReplace(path, mode, name, newDate, expect) {
+            const apiBase = window.location.pathname.replace(/[#?].*$/, '');
+            const body = new URLSearchParams();
+            body.append('file', path);
+            body.append('mode', mode);
+            body.append('name', name || '');
+            body.append('to', newDate);
+            body.append('expect', expect || '');
+            let d = null;
+            try { d = await (await fetch(apiBase + '?action=replaceArticleDate', { method: 'POST', body })).json(); } catch (e) { return false; }
+            if (!d || !d.ok || !d.changed) return false;
+            // Dacă fișierul e deschis într-un tab nemodificat, îl reîncarcă
+            const t = findTabByPath(path);
+            if (t && !t.isDirty) {
+                const html = await dateSyncLoad(path);
+                if (html !== null) {
+                    t.editorContent = html;
+                    t.originalContent = html;
+                    t.originalContentNorm = normalizeHtmlForCompare(html);
+                    if (t.id === activeTabId && editor) {
+                        isSyncFromDesign = true;
+                        editor.setValue(html);
+                        isSyncFromDesign = false;
+                        if (typeof updatePreview === 'function') updatePreview();
+                    }
+                    updateTabPresentation(t);
+                }
+            }
+            return true;
+        }
+
+        async function syncDateToEnglishCounterpart(roPath, roHtml) {
+            const roDir = String(roPath).replace(/\\/g, '/').replace(/\/[^\/]*$/, '');
+            if (!/\/ro$/i.test(roDir)) return;
+            const enDir = roDir.replace(/\/ro$/i, '/en');
+            const roDate = dateDupParseArticleDate(roHtml);
+            if (!roDate) return;
+            // Linkul en din FLAGS
+            const flags = /<!--\s*FLAGS_1\s*-->([\s\S]*?)<!--\s*FLAGS\s*-->/i.exec(roHtml);
+            const enLink = /href\s*=\s*["']https?:\/\/(?:www\.)?neculaifantanaru\.com\/en\/([^"'#?\/]+\.html?)["']/i
+                .exec(flags ? flags[1] : roHtml);
+            if (!enLink) return;
+            const enName = enLink[1];
+            const enPath = enDir + '/' + enName;
+            const enHtml = await dateSyncLoad(enPath);
+            if (enHtml === null) return; // traducerea lipsește încă
+            const h = enHtml.search(/<h1\b[^>]*class\s*=\s*["'][^"']*\bden_articol\b/i);
+            if (h === -1) return;
+            const enCur = dateDupParseArticleDate(enHtml);
+            const pad = enCur ? enCur.padDay : roDate.padDay;
+            const newEnDate = dateDupFormat(roDate.key, 'en', pad);
+            const updated = [];
+            const oldEnDate = enCur ? enCur.text : '';
+            if (!enCur || enCur.key !== roDate.key) {
+                if (await dateSyncReplace(enPath, 'article', '', newEnDate, '')) updated.push('en/' + enName);
+            }
+            // Categoria en (din linkul de lângă dată) și en/index.html
+            const catLink = /class\s*=\s*["'][^"']*\btext_dreapta\b[^"']*["'][^>]*>[\s\S]*?<a\b[^>]*\bhref\s*=\s*["']([^"']+)["']/i.exec(enHtml.slice(h));
+            const enCat = catLink ? catLink[1].split('#')[0].split('?')[0].split('/').pop() : '';
+            if (enCat && await dateSyncReplace(enDir + '/' + enCat, 'list', enName, newEnDate, oldEnDate)) updated.push('en/' + enCat);
+            if (await dateSyncReplace(enDir + '/index.html', 'list', enName, newEnDate, oldEnDate)) updated.push('en/index.html');
+            if (updated.length) toast('Data a fost schimbată și în engleză: ' + updated.join(', '));
+        }
+
         function firstParsedIndexBlockTimestamp(blocks) {
             if (!blocks || !blocks.length) return null;
             for (let i = 0; i < blocks.length; i++) {
@@ -5503,6 +5844,516 @@ if (isset($_GET['action'])) {
             const b = e.target && e.target.closest ? e.target.closest('#btnAddCat, #btnToIndex') : null;
             if (b) scheduleRecentArticlesCheck(3000);
         }, true);
+
+        // ── Date duplicate între articole (ro/ și en/) ──
+        //  • la 10 s după ce schimbi data articolului deschis → verifică dacă mai e în alt articol
+        //  • la pornirea aplicației → verificare completă în fundal
+        //  Fereastra arată grupurile de dubluri colorate, fișierele ca linkuri (se deschid în editor)
+        //  și 2 date libere, cât mai apropiate.
+        const DATE_DUP_DELAY_MS = 10000;
+        const DATE_DUP_MONTHS = {
+            ro: ['Ianuarie', 'Februarie', 'Martie', 'Aprilie', 'Mai', 'Iunie', 'Iulie', 'August', 'Septembrie', 'Octombrie', 'Noiembrie', 'Decembrie'],
+            en: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+        };
+        const DATE_DUP_COLORS = ['#f59e0b', '#38bdf8', '#a78bfa', '#34d399', '#f472b6', '#fb7185', '#facc15', '#2dd4bf', '#c084fc', '#4ade80'];
+        let dateDupTimer = null;
+
+        function dateDupDirs() {
+            return [TO_INDEX_RO_HTML_PATH, TO_INDEX_EN_HTML_PATH].map(p => p.replace(/\/[^\/]*$/, ''));
+        }
+        function dateDupNormPath(p) { return String(p || '').replace(/\\/g, '/').toLowerCase(); }
+        function dateDupLangOfDir(dir) { return /\/en$/i.test(String(dir).replace(/\\/g, '/')) ? 'en' : 'ro'; }
+        function dateDupDirOfFile(path) {
+            const fileDir = dateDupNormPath(path).replace(/\/[^\/]*$/, '');
+            return dateDupDirs().find(d => dateDupNormPath(d) === fileDir) || null;
+        }
+        // Zi calendaristică ca număr comparabil (aaaallzz)
+        function dateDupDayKey(y, m, d) { return y * 10000 + m * 100 + d; }
+        function dateDupKeyFromTs(ts) {
+            const dt = new Date(ts * 1000);
+            return dateDupDayKey(dt.getFullYear(), dt.getMonth() + 1, dt.getDate());
+        }
+        function dateDupKeyToDate(k) { return new Date(Math.floor(k / 10000), Math.floor(k / 100) % 100 - 1, k % 100); }
+        function dateDupDateToKey(dt) { return dateDupDayKey(dt.getFullYear(), dt.getMonth() + 1, dt.getDate()); }
+
+        // Data „On Luna zi, an” de sub <h1 class="den_articol"> din HTML-ul dat
+        function dateDupParseArticleDate(html) {
+            html = String(html || '');
+            const h = html.search(/<h1\b[^>]*class\s*=\s*["'][^"']*\bden_articol\b/i);
+            if (h === -1) return null;
+            const td = /class\s*=\s*["'][^"']*\btext_dreapta\b[^"']*["'][^>]*>([\s\S]*?)<\/td>/i.exec(html.slice(h));
+            if (!td) return null;
+            const plain = td[1].replace(/<[^>]*>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ').replace(/\s+/g, ' ');
+            const m = /\bOn\s+([^\s\d,]+)\s+(\d{1,2}),?\s+(\d{4})\b/i.exec(plain);
+            if (!m) return null;
+            const mon = m[1].toLowerCase();
+            let mi = DATE_DUP_MONTHS.ro.findIndex(x => x.toLowerCase() === mon);
+            if (mi === -1) mi = DATE_DUP_MONTHS.en.findIndex(x => x.toLowerCase() === mon);
+            if (mi === -1) return null;
+            const y = +m[3], d = +m[2];
+            const test = new Date(y, mi, d);
+            if (test.getMonth() !== mi || test.getDate() !== d) return null;
+            return { key: dateDupDayKey(y, mi + 1, d), text: m[0], padDay: /^0\d$/.test(m[2]) };
+        }
+
+        function dateDupFormat(key, lang, padDay) {
+            const dt = dateDupKeyToDate(key);
+            const day = padDay ? String(dt.getDate()).padStart(2, '0') : String(dt.getDate());
+            return 'On ' + DATE_DUP_MONTHS[lang][dt.getMonth()] + ' ' + day + ', ' + dt.getFullYear();
+        }
+
+        // 2 date libere, cât mai apropiate: prima înainte și prima după (dacă „după” ar fi
+        // în viitor, a doua alternativă e tot înainte).
+        function dateDupAlternatives(key, usedKeys, todayKey) {
+            const out = [];
+            const before = [];
+            let dt = dateDupKeyToDate(key);
+            for (let i = 0; i < 4000 && before.length < 2; i++) {
+                dt.setDate(dt.getDate() - 1);
+                const k = dateDupDateToKey(dt);
+                if (!usedKeys.has(k)) before.push(k);
+            }
+            let after = null;
+            dt = dateDupKeyToDate(key);
+            for (let i = 0; i < 4000; i++) {
+                dt.setDate(dt.getDate() + 1);
+                const k = dateDupDateToKey(dt);
+                if (todayKey && k > todayKey) break;
+                if (!usedKeys.has(k)) { after = k; break; }
+            }
+            if (before[0]) out.push(before[0]);
+            if (after) out.push(after);
+            else if (before[1]) out.push(before[1]);
+            return out.sort((a, b) => b - a);
+        }
+
+        async function dateDupFetchDir(dir) {
+            const apiBase = window.location.pathname.replace(/[#?].*$/, '');
+            const res = await (await fetch(apiBase + '?action=articleDates&dir=' + encodeURIComponent(dir), { cache: 'no-store' })).json();
+            if (!res || !res.ok) throw new Error((res && res.error) || 'Nu pot citi datele articolelor');
+            const todayKey = res.today ? dateDupKeyFromTs(res.today) : dateDupDateToKey(new Date());
+            const items = (res.articles || []).map(a => ({
+                file: a.file, key: dateDupKeyFromTs(a.ts), date: a.date, cat: a.cat || '', catName: a.catName || '',
+                listed: a.listed !== false
+            }));
+            const padDay = items.some(a => /\s0\d,/.test(a.date));
+            return { dir, lang: dateDupLangOfDir(dir), todayKey, items, padDay };
+        }
+
+        // Verificare completă: toate grupurile de articole cu aceeași dată, pe fiecare limbă
+        async function runFullDateDuplicateCheck(manual) {
+            const sections = [];
+            for (const dir of dateDupDirs()) {
+                let data;
+                try { data = await dateDupFetchDir(dir); } catch (e) { continue; }
+                const byKey = new Map();
+                data.items.filter(a => a.listed).forEach(a => {
+                    if (!byKey.has(a.key)) byKey.set(a.key, []);
+                    byKey.get(a.key).push(a);
+                });
+                const used = new Set(byKey.keys());
+                const groups = [];
+                byKey.forEach((files, key) => {
+                    if (files.length < 2) return;
+                    groups.push({
+                        key, files,
+                        alts: dateDupAlternatives(key, used, data.todayKey).map(k => dateDupFormat(k, data.lang, data.padDay))
+                    });
+                });
+                groups.sort((a, b) => b.key - a.key);
+                if (groups.length) sections.push({ lang: data.lang, dir, groups });
+            }
+            // Automat (la pornire): lista mare apare doar dacă nu e deschis niciun HTML.
+            // Cu un fișier deschis, apare doar fereastra mică, după ce îi schimbi data.
+            if (!manual && tabs.some(t => t.filePath && t.type !== 'browser')) return;
+            if (sections.length) showDateDuplicatesDialog(sections, null);
+            else if (manual) { closeDateDuplicatesDialog('all'); toast('Nicio dată duplicată în articolele din ro/ și en/.'); }
+            else closeDateDuplicatesDialog('all');
+        }
+
+        // Verificarea articolului deschis (data din editor, chiar nesalvată)
+        // onlyPath: verifică doar dacă acel fișier e încă cel deschis (s-ar putea să fi schimbat tab-ul)
+        // silent: fără mesaj când data e unică (verificarea de la deschiderea fișierului)
+        async function runCurrentDateDuplicateCheck(onlyPath, silent) {
+            if (!editor || !currentFile) return;
+            if (onlyPath && dateDupNormPath(onlyPath) !== dateDupNormPath(currentFile)) return;
+            const dir = dateDupDirOfFile(currentFile);
+            if (!dir) return;
+            const cur = dateDupParseArticleDate(editor.getValue());
+            if (!cur) return;
+            let data;
+            try { data = await dateDupFetchDir(dir); } catch (e) { return; }
+            const me = dateDupNormPath(currentFile);
+            // celelalte articole (doar cele din categorii); fișierul deschis e verificat oricum
+            const others = data.items.filter(a => a.listed && dateDupNormPath(a.file) !== me);
+            const same = others.filter(a => a.key === cur.key);
+            if (!same.length) {
+                closeDateDuplicatesDialog('file');
+                if (!silent) toast('Data „' + cur.text.replace(/^On\s+/i, '') + '” nu mai apare în alt articol.');
+                return;
+            }
+            const used = new Set(others.map(a => a.key));
+            const mine = data.items.find(a => dateDupNormPath(a.file) === me);
+            const meEntry = { file: currentFile, key: cur.key, date: cur.text, cat: mine ? mine.cat : '', catName: mine ? mine.catName : '', current: true };
+            showDateDuplicatesDialog([{
+                lang: data.lang, dir,
+                groups: [{
+                    key: cur.key, files: [meEntry].concat(same),
+                    alts: dateDupAlternatives(cur.key, used, data.todayKey).map(k => dateDupFormat(k, data.lang, cur.padDay || data.padDay))
+                }]
+            }], currentFile);
+        }
+
+        // Chemat la fiecare schimbare în cod: dacă s-a schimbat data articolului, verifică după 10 s
+        function noteEditorChangeForDateCheck() {
+            if (!editor || !activeTabId || !currentFile || !dateDupDirOfFile(currentFile)) return;
+            const tab = tabs.find(t => t.id === activeTabId);
+            if (!tab) return;
+            const cur = dateDupParseArticleDate(editor.getValue());
+            const k = cur ? cur.key : null;
+            const path = currentFile;
+            if (tab._dateDupKey === undefined || tab._dateDupFile !== currentFile) {
+                // Fișier abia deschis: verifică data lui după 10 s (fereastră doar dacă e dublură)
+                tab._dateDupKey = k;
+                tab._dateDupFile = currentFile;
+                if (k !== null) {
+                    clearTimeout(dateDupTimer);
+                    dateDupTimer = setTimeout(() => runCurrentDateDuplicateCheck(path, true), DATE_DUP_DELAY_MS);
+                }
+                return;
+            }
+            if (k === tab._dateDupKey) return;
+            tab._dateDupKey = k;
+            if (k === null) return;
+            clearTimeout(dateDupTimer);
+            dateDupTimer = setTimeout(() => runCurrentDateDuplicateCheck(path, false), DATE_DUP_DELAY_MS);
+        }
+
+        // ── Link-Duble: același articol apare de 2+ ori în paginile de categorie (ro/ sau en/) ──
+        async function runLinkDuplicateCheck() {
+            toast('Caut linkurile duble în paginile de categorie…');
+            const apiBase = window.location.pathname.replace(/[#?].*$/, '');
+            const sections = [];
+            for (const dir of dateDupDirs()) {
+                let res = null;
+                try {
+                    res = await (await fetch(apiBase + '?action=categoryLinks&dir=' + encodeURIComponent(dir), { cache: 'no-store' })).json();
+                } catch (e) { continue; }
+                if (!res || !res.ok) continue;
+                const byName = new Map();
+                (res.categories || []).forEach(cat => {
+                    (cat.links || []).forEach(l => {
+                        if (!byName.has(l[0])) byName.set(l[0], []);
+                        byName.get(l[0]).push({ cat, text: l[1] });
+                    });
+                });
+                const groups = [];
+                byName.forEach((hits, name) => {
+                    if (hits.length < 2) return;
+                    // aceeași categorie poate apărea de mai multe ori → un rând per categorie, cu numărul
+                    const perCat = new Map();
+                    hits.forEach(h => {
+                        const k = h.cat.file;
+                        perCat.set(k, (perCat.get(k) || { cat: h.cat, n: 0 }));
+                        perCat.get(k).n++;
+                    });
+                    const files = [{ file: dir + '/' + name, info: '(articolul)' }];
+                    perCat.forEach(v => {
+                        const catTitle = String(v.cat.title || '').replace(/\s*\|.*$/, '');
+                        files.push({
+                            file: v.cat.file,
+                            info: (catTitle ? 'categoria: ' + catTitle : 'pagină de categorie') + (v.n > 1 ? ' — de ' + v.n + ' ori aici' : '')
+                        });
+                    });
+                    groups.push({
+                        key: name,
+                        title: (hits[0].text || name) + ' — apare de ' + hits.length + ' ori în categorii',
+                        files, alts: []
+                    });
+                });
+                groups.sort((a, b) => a.title.localeCompare(b.title, 'ro'));
+                if (groups.length) sections.push({ lang: dateDupLangOfDir(dir), dir, groups });
+            }
+            if (!sections.length) {
+                const old = document.getElementById('linkDuplicatesDialog');
+                if (old) old.remove();
+                toast('Niciun link dublu în paginile de categorie din ro/ și en/.');
+                return;
+            }
+            showDateDuplicatesDialog(sections, null, {
+                id: 'linkDuplicatesDialog',
+                title: n => 'Linkuri duble în categorii (' + n + ' ' + (n === 1 ? 'articol' : 'articole') + ')',
+                recheck: runLinkDuplicateCheck
+            });
+        }
+
+        // Butonul Date-Duble (ecranul de pornire): lista mare cu datele duplicate
+        function openDateDuplicatesFromStart() {
+            toast('Caut datele duplicate…');
+            runFullDateDuplicateCheck(true);
+        }
+
+        // Toate dublurile ca text simplu (butonul Copy), ex. pentru un .txt
+        function dateDuplicatesAsText(sections) {
+            const lines = [];
+            sections.forEach(sec => {
+                lines.push((sec.lang === 'en' ? 'ENGLEZĂ' : 'ROMÂNĂ') + ' — ' + sec.dir.replace(/\\/g, '/') + '/');
+                lines.push('');
+                sec.groups.forEach(g => {
+                    lines.push(g.title || (String(g.files[0].date || '').replace(/^On\s+/i, '') + ' — ' + g.files.length + ' articole'));
+                    g.files.forEach(f => {
+                        const extra = f.info !== undefined ? f.info : (f.catName ? 'categoria: ' + f.catName : '');
+                        lines.push('   ' + f.file.replace(/\\/g, '/') + (extra ? '   (' + extra + ')' : ''));
+                    });
+                    if (g.alts.length) lines.push('   Date libere apropiate: ' + g.alts.join('  |  '));
+                    lines.push('');
+                });
+            });
+            return lines.join('\r\n');
+        }
+
+        // which: 'all' = lista mare, 'file' = fereastra fișierului deschis, nimic = ambele
+        function closeDateDuplicatesDialog(which) {
+            if (which !== 'file') { const a = document.getElementById('dateDuplicatesDialog'); if (a) a.remove(); }
+            if (which !== 'all') { const f = document.getElementById('dateDupFileDialog'); if (f) f.remove(); }
+        }
+
+        // opts (opțional): { id, title, recheck } — folosit și de fereastra Link-Duble
+        function showDateDuplicatesDialog(sections, currentPath, opts) {
+            opts = opts || {};
+            const boxId = opts.id || (currentPath ? 'dateDupFileDialog' : 'dateDuplicatesDialog');
+            let box = document.getElementById(boxId);
+            const keepPos = box ? { left: box.style.left, top: box.style.top } : null;
+            if (box) box.remove();
+            box = document.createElement('div');
+            box.id = boxId;
+            box.style.cssText = 'position:fixed;left:50%;top:80px;transform:translateX(-50%);z-index:99991;' +
+                'width:min(760px,calc(100vw - 32px));max-height:calc(100vh - 120px);display:flex;flex-direction:column;' +
+                'background:#1f2937;border:2px solid #ef4444;border-radius:10px;color:#eee;font-size:15px;line-height:1.45;' +
+                'box-shadow:0 12px 36px rgba(0,0,0,.6)';
+            if (currentPath) {
+                // Fereastra fișierului deschis: mai mică, în dreapta, ca să nu acopere lista mare
+                box.style.left = 'auto';
+                box.style.right = '24px';
+                box.style.top = '120px';
+                box.style.transform = 'none';
+                box.style.width = 'min(620px,calc(100vw - 32px))';
+            }
+            if (keepPos && keepPos.left) {
+                box.style.left = keepPos.left; box.style.top = keepPos.top; box.style.transform = 'none';
+                box.style.right = 'auto';
+            }
+            const head = document.createElement('div');
+            head.style.cssText = 'display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #374151;cursor:move;user-select:none';
+            const total = sections.reduce((n, s) => n + s.groups.length, 0);
+            head.innerHTML = '<i class="fas fa-calendar-times" style="color:#ef4444"></i><b style="flex:1"></b>';
+            head.querySelector('b').textContent = opts.title ? opts.title(total) : currentPath
+                ? 'Data acestui articol mai apare în alt articol'
+                : 'Date duplicate în articole (' + total + ' ' + (total === 1 ? 'grup' : 'grupuri') + ')';
+            const recheck = document.createElement('button');
+            recheck.className = 'btn btn-ghost';
+            recheck.textContent = 'Reverifică';
+            recheck.title = 'Verifică din nou toate articolele din ro/ și en/';
+            recheck.style.cssText = 'padding:3px 10px;font-size:14px';
+            if (currentPath) recheck.title = 'Verifică din nou data acestui articol';
+            recheck.onclick = () => {
+                recheck.textContent = 'Verific…';
+                if (opts.recheck) {
+                    opts.recheck();
+                } else if (currentPath) {
+                    closeDateDuplicatesDialog('file');
+                    runCurrentDateDuplicateCheck();
+                } else {
+                    runFullDateDuplicateCheck(true);
+                }
+            };
+            const close = document.createElement('button');
+            close.className = 'btn btn-ghost';
+            close.textContent = '×';
+            close.title = 'Închide';
+            close.style.cssText = 'padding:2px 10px;font-size:18px';
+            close.onclick = () => box.remove();
+            head.appendChild(recheck);
+            head.appendChild(close);
+            box.appendChild(head);
+
+            // Fereastra mare: Find propriu (caută doar în dublurile de aici) + Copy (tot ca text)
+            let findInput = null, findInfo = null;
+            if (!currentPath) {
+                const bar = document.createElement('div');
+                bar.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 16px;border-bottom:1px solid #374151';
+                findInput = document.createElement('input');
+                findInput.type = 'text';
+                findInput.placeholder = 'Find în dubluri: fișier, dată, categorie…';
+                findInput.style.cssText = 'flex:1;background:#15161d;border:1px solid #444;border-radius:4px;padding:6px 10px;color:#eee;font-size:14px';
+                findInput.addEventListener('keydown', e => {
+                    e.stopPropagation(); // nu declanșa scurtăturile editorului
+                    if (e.key === 'Escape') { findInput.value = ''; applyFind(); }
+                });
+                findInfo = document.createElement('span');
+                findInfo.style.cssText = 'color:#9ca3af;font-size:13px;white-space:nowrap';
+                const copyBtn = document.createElement('button');
+                copyBtn.className = 'btn btn-ghost';
+                copyBtn.textContent = 'Copy';
+                copyBtn.title = 'Copiază toate dublurile ca text (pentru un .txt)';
+                copyBtn.style.cssText = 'padding:4px 12px;font-size:14px';
+                copyBtn.onclick = () => {
+                    const txt = dateDuplicatesAsText(sections);
+                    const done = () => toast('Am copiat ' + total + ' grupuri.');
+                    try {
+                        navigator.clipboard.writeText(txt).then(done, () => { fallbackCopy(txt); done(); });
+                    } catch (e) { fallbackCopy(txt); done(); }
+                };
+                bar.appendChild(findInput);
+                bar.appendChild(findInfo);
+                bar.appendChild(copyBtn);
+                box.appendChild(bar);
+            }
+            function fallbackCopy(txt) {
+                const ta = document.createElement('textarea');
+                ta.value = txt;
+                ta.style.cssText = 'position:fixed;left:-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                try { document.execCommand('copy'); } catch (e) { }
+                ta.remove();
+            }
+
+            const body = document.createElement('div');
+            body.style.cssText = 'overflow:auto;padding:8px 16px 14px';
+            let colorIdx = 0;
+            sections.forEach(sec => {
+                if (!currentPath) {
+                    const h = document.createElement('div');
+                    h.className = 'dd-sec';
+                    h.style.cssText = 'margin:10px 0 4px;color:#9ca3af;font-size:13px;text-transform:uppercase;letter-spacing:.05em';
+                    h.textContent = (sec.lang === 'en' ? 'Engleză' : 'Română') + ' — ' + sec.dir.replace(/\\/g, '/').split('/').slice(-2).join('/') + '/';
+                    body.appendChild(h);
+                }
+                sec.groups.forEach(g => {
+                    const color = DATE_DUP_COLORS[colorIdx++ % DATE_DUP_COLORS.length];
+                    const card = document.createElement('div');
+                    card.className = 'dd-card';
+                    card.style.cssText = 'border-left:4px solid ' + color + ';background:rgba(255,255,255,.03);border-radius:6px;padding:8px 12px;margin:8px 0';
+                    const title = document.createElement('div');
+                    title.style.cssText = 'font-weight:700;color:' + color;
+                    title.textContent = g.title || (String(g.files[0].date || '').replace(/^On\s+/i, '') + ' — ' + g.files.length + ' articole');
+                    card.appendChild(title);
+                    g.files.forEach(f => {
+                        const row = document.createElement('div');
+                        row.style.cssText = 'display:flex;gap:8px;align-items:baseline;padding:2px 0';
+                        const link = document.createElement('a');
+                        link.href = '#';
+                        link.textContent = f.file.replace(/\\/g, '/').split('/').pop();
+                        link.title = 'Deschide în editor: ' + f.file;
+                        link.style.cssText = 'color:' + color + ';font-weight:600;text-decoration:underline;cursor:pointer';
+                        link.onclick = e => {
+                            e.preventDefault();
+                            window._dateDupOpeningFromList = true; // lista mare rămâne deschisă
+                            Promise.resolve(openFile(f.file)).finally(() => { window._dateDupOpeningFromList = false; });
+                        };
+                        row.appendChild(link);
+                        const info = document.createElement('span');
+                        info.style.cssText = 'color:#9ca3af;font-size:13px';
+                        info.textContent = f.info !== undefined ? f.info
+                            : (f.current ? '(articolul deschis acum) ' : '') + (f.catName ? 'categoria: ' + f.catName : '');
+                        row.appendChild(info);
+                        card.appendChild(row);
+                    });
+                    if (g.alts.length) {
+                        const alt = document.createElement('div');
+                        alt.style.cssText = 'margin-top:4px;font-size:14px';
+                        alt.innerHTML = '<span style="color:#9ca3af">Date libere apropiate: </span>';
+                        g.alts.forEach((a, i) => {
+                            const chip = document.createElement('span');
+                            chip.textContent = a;
+                            chip.title = 'Click = copiază data';
+                            chip.style.cssText = 'display:inline-block;margin:2px 6px 2px 0;padding:1px 8px;border-radius:10px;' +
+                                'background:#065f46;color:#d1fae5;cursor:pointer;font-weight:600';
+                            chip.onclick = () => {
+                                try { navigator.clipboard.writeText(a); toast('Copiat: ' + a); } catch (e) { }
+                            };
+                            alt.appendChild(chip);
+                        });
+                        card.appendChild(alt);
+                    }
+                    body.appendChild(card);
+                });
+            });
+            box.appendChild(body);
+            document.body.appendChild(box);
+
+            // Textele în care caută Find-ul ferestrei (titlu grup, fișiere, categorii, date libere)
+            const searchable = Array.from(body.querySelectorAll('.dd-card > div:first-child, .dd-card a, .dd-card span'))
+                .filter(el => !el.children.length);
+            searchable.forEach(el => { el.dataset.ddText = el.textContent; });
+            function applyFind() {
+                if (!findInput) return;
+                const q = findInput.value.trim();
+                let re = null;
+                if (q) { try { re = new RegExp(buildDiacInsensitivePattern(q), 'gi'); } catch (e) { re = null; } }
+                const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+                searchable.forEach(el => {
+                    const t = el.dataset.ddText;
+                    el.innerHTML = re
+                        ? esc(t).replace(new RegExp(buildDiacInsensitivePattern(esc(q)), 'gi'), m => '<mark style="background:#facc15;color:#111;border-radius:2px">' + m + '</mark>')
+                        : esc(t);
+                });
+                let shown = 0, hits = 0;
+                const cards = Array.from(body.querySelectorAll('.dd-card'));
+                cards.forEach(c => {
+                    const n = c.querySelectorAll('mark').length;
+                    const ok = !re || n > 0;
+                    c.style.display = ok ? '' : 'none';
+                    if (ok) shown++;
+                    hits += n;
+                });
+                // Titlul de limbă (ro / en) dispare dacă nu are niciun grup vizibil
+                body.querySelectorAll('.dd-sec').forEach(sec => {
+                    let el = sec.nextElementSibling, any = false;
+                    while (el && !el.classList.contains('dd-sec')) {
+                        if (el.style.display !== 'none') { any = true; break; }
+                        el = el.nextElementSibling;
+                    }
+                    sec.style.display = any ? '' : 'none';
+                });
+                findInfo.textContent = re ? (hits + ' potriviri în ' + shown + ' grupuri') : (cards.length + ' grupuri');
+                const first = body.querySelector('mark');
+                if (first) first.scrollIntoView({ block: 'nearest' });
+            }
+            if (findInput) {
+                let ft = null;
+                findInput.addEventListener('input', () => { clearTimeout(ft); ft = setTimeout(applyFind, 150); });
+                applyFind();
+            }
+
+            // Fereastra se poate muta trăgând de bara de sus
+            head.addEventListener('mousedown', e => {
+                if (e.button !== 0 || e.target.closest('button')) return;
+                e.preventDefault();
+                const r = box.getBoundingClientRect();
+                box.style.transform = 'none';
+                box.style.right = 'auto';
+                box.style.left = r.left + 'px';
+                box.style.top = r.top + 'px';
+                const sx = e.clientX, sy = e.clientY, sl = r.left, st = r.top;
+                document.querySelectorAll('iframe').forEach(f => f.style.pointerEvents = 'none');
+                const move = ev => {
+                    box.style.left = Math.max(0, Math.min(window.innerWidth - 80, sl + ev.clientX - sx)) + 'px';
+                    box.style.top = Math.max(0, Math.min(window.innerHeight - 40, st + ev.clientY - sy)) + 'px';
+                };
+                const up = () => {
+                    window.removeEventListener('mousemove', move);
+                    window.removeEventListener('mouseup', up);
+                    document.querySelectorAll('iframe').forEach(f => f.style.pointerEvents = '');
+                };
+                window.addEventListener('mousemove', move);
+                window.addEventListener('mouseup', up);
+            });
+        }
+
+        // La pornire: verificare completă imediat (scanarea vine din cache, durează ~1 s)
+        setTimeout(() => { runFullDateDuplicateCheck(false).catch(() => { }); }, 0);
 
         function showIndexOrderReport(reports) {
             let dialog = document.getElementById('indexOrderReport');
@@ -5984,7 +6835,15 @@ if (isset($_GET['action'])) {
                 const repInp = document.getElementById('frReplaceInput');
                 // Pre-fill with current selection, or clear if nothing selected
                 if (editor) {
-                    const sel = editor.getSelection();
+                    let sel = editor.getSelection();
+                    if (viewMode === 'design') {
+                        let dt = '';
+                        try {
+                            const w = document.getElementById('preview').contentWindow;
+                            dt = (w.getSelection() || '').toString();
+                        } catch (e) { }
+                        sel = dt && dt.trim() && !/\n/.test(dt) ? dt.trim() : '';
+                    }
                     if (sel) {
                         inp.value = sel;
                     } else {
@@ -6186,6 +7045,24 @@ if (isset($_GET['action'])) {
             _frLastCaseSens = cs;
             _frLastWholeWord = ww;
             findAllMatches();
+            if (ds && frDesignMatchCount > 0) {
+                // Design: pornește de la primul rezultat de după cursorul din Design
+                frCurrentIdx = -1;
+                try {
+                    const ifr = document.getElementById('preview');
+                    const dsel = ifr.contentWindow.getSelection();
+                    if (dsel && dsel.rangeCount) {
+                        const cur = dsel.getRangeAt(0);
+                        const marks = ifr.contentDocument.querySelectorAll('mark[data-fr-highlight]');
+                        for (let i = 0; i < marks.length; i++) {
+                            const mr = ifr.contentDocument.createRange();
+                            mr.selectNode(marks[i]);
+                            if (mr.compareBoundaryPoints(Range.START_TO_START, cur) >= 0) { frCurrentIdx = i - 1; break; }
+                        }
+                    }
+                } catch (e) { frCurrentIdx = -1; }
+                return;
+            }
             // After a fresh search, position index so the NEXT call lands on
             // the first match at or after the current cursor.
             if (frCurrentMatches.length > 0) {
@@ -6227,6 +7104,30 @@ if (isset($_GET['action'])) {
         }
 
         function goToMatch(idx) {
+            // În Design, rezultatele sunt marcajele din Design (nu pozițiile din cod,
+            // care pot fi altele: <title>, meta, marcaje vechi etc.).
+            if (_isFindDesignScoped() && (viewMode === 'design' || viewMode === 'split')) {
+                const doc = document.getElementById('preview').contentDocument;
+                const marks = doc ? doc.querySelectorAll('mark[data-fr-highlight]') : [];
+                if (marks.length !== frDesignMatchCount || marks.length === 0) {
+                    // Design-ul a fost reîncărcat între timp → refă marcajele
+                    frDesignMatchCount = highlightFindInDesign();
+                    if (frDesignMatchCount === 0) {
+                        document.getElementById('frInfo').textContent = 'Niciun rezultat';
+                        return;
+                    }
+                    if (idx >= frDesignMatchCount) idx = frCurrentIdx = 0;
+                }
+                // Nu lăsa panoul de jos (Font, Clasa…) să sară la fiecare rezultat
+                window._frNavigatingUntil = Date.now() + 800;
+                try { scrollToDesignMatch(idx); } catch (e) { }
+                if (viewMode === 'split') {
+                    try { syncSelectionToCodeFromDesign(); } catch (e) { }
+                }
+                document.getElementById('frInfo').textContent =
+                    'Rezultat ' + (idx + 1) + ' din ' + frDesignMatchCount;
+                return;
+            }
             const match = frCurrentMatches[idx];
             if (match) {
                 editor.setSelection(match.from, match.to);
@@ -6636,6 +7537,28 @@ if (isset($_GET['action'])) {
                 });
                 isSyncFromDesign = false;
                 applyCodeToDesignPanel();
+            });
+
+            // Data articolului schimbată (în Code sau Design) → verificare dubluri după 10 s
+            editor.on('change', () => {
+                try { noteEditorChangeForDateCheck(); } catch (e) { }
+            });
+
+            // Paste în Code cu <span style="font-family…"> (stil AI) → rescris imediat în stilul site-ului
+            editor.on('change', (cm, change) => {
+                if (!change || change.origin !== 'paste') return;
+                if (!/<span\b[^>]*\bstyle\s*=/i.test((change.text || []).join('\n'))) return;
+                if (!isCurrentFileHtml()) return;
+                setTimeout(() => {
+                    const src = cm.getValue();
+                    const edits = computeAiStyledSpanEdits(src);
+                    if (!edits.length) return;
+                    cm.operation(() => {
+                        for (let i = edits.length - 1; i >= 0; i--) {
+                            cm.replaceRange(edits[i].text, cm.posFromIndex(edits[i].from), cm.posFromIndex(edits[i].to), '+aiStyleCleanup');
+                        }
+                    });
+                }, 0);
             });
 
             editor.on('change', () => {
@@ -7221,6 +8144,13 @@ if (isset($_GET['action'])) {
         }
 
         async function openFile(path, el) {
+            // Lista mare cu toate datele duplicate e doar pentru pornire (fără HTML deschis);
+            // rămâne deschisă doar când fișierul e deschis chiar din link-ul ei.
+            if (!window._dateDupOpeningFromList && typeof closeDateDuplicatesDialog === 'function') {
+                closeDateDuplicatesDialog('all');
+                const ld = document.getElementById('linkDuplicatesDialog');
+                if (ld) ld.remove();
+            }
             // Check if file is already open in a tab
             var existing = findTabByPath(path);
             if (existing) {
@@ -7275,6 +8205,7 @@ if (isset($_GET['action'])) {
                 isSyncFromDesign = false;
                 _isRestoringTab = false;
                 editor.getDoc().clearHistory();
+                const aiFixedOpen = cleanAiStyleInOpenedTab(tab, data.file);
                 lastPreviewHadBody = tab.lastPreviewHadBody;
                 clearTimeout(previewDebounceTimer);
                 previewDebounceTimer = null;
@@ -7285,6 +8216,7 @@ if (isset($_GET['action'])) {
                 designUndoStack = [];
                 designRedoStack = [];
                 lastDesignSnapshot = null;
+                markTabDirtyAfterAiCleanup(tab, aiFixedOpen);
 
                 setViewMode('design');
                 renderTabs();
@@ -7335,6 +8267,10 @@ if (isset($_GET['action'])) {
                 var contentToSave = rawContent;
                 if (isCurrentFileHtml() && typeof removePasteWhitespaceNormalSpansFromHtml === 'function') {
                     contentToSave = removePasteWhitespaceNormalSpansFromHtml(contentToSave);
+                }
+                if (isCurrentFileHtml() && typeof cleanAiStyledSpansInHtml === 'function') {
+                    contentToSave = stripFindMarksFromHtml(contentToSave);
+                    contentToSave = cleanAiStyledSpansInHtml(contentToSave);
                 }
                 if (isCurrentFileHtml() && typeof removeOrphanClosingSpansFromParagraphs === 'function') {
                     contentToSave = removeOrphanClosingSpansFromParagraphs(contentToSave);
@@ -7412,6 +8348,7 @@ if (isset($_GET['action'])) {
                         tab.isDirty = false;
                         tab.filePath = currentFile;
                         tab.fileName = shortName(currentFile);
+                        var _prevSavedContent = tab.originalContent;
                         tab.originalContent = contentToSave;
                         tab.originalContentNorm = normalizeHtmlForCompare(tab.originalContent);
                         tab.editorContent = tab.originalContent;
@@ -7437,6 +8374,12 @@ if (isset($_GET['action'])) {
                             refreshTabLinkedCategory(tab);
                             await syncLinkedCategoryDescriptionAfterArticleSave(tab, tab.originalContent);
                             await syncArticleBlockToCategoryAndIndexAfterSave(currentFile, tab.originalContent);
+                            // Pagină de categorie / index: data schimbată la un articol → și în articol
+                            try { await syncListDatesToArticlesAfterSave(currentFile, _prevSavedContent, tab.originalContent); } catch (e) { console.error(e); }
+                            // Articol din ro/ → aceeași dată și în traducerea din en/ (articol + categorie + index)
+                            if (!isHtmlCategoryListingPage(tab.originalContent)) {
+                                try { await syncDateToEnglishCounterpart(currentFile, tab.originalContent); } catch (e) { console.error(e); }
+                            }
                         }
                         tab.categorySyncDescriptionBaseline = getCategorySyncDescriptionFromArticleHtml(tab.originalContent);
                         updateTabPresentation(tab);
@@ -7779,6 +8722,291 @@ if (isset($_GET['action'])) {
             );
         }
 
+        // ── Stil AI lipit (ChatGPT / Gemini) ──
+        // Textul copiat din AI vine adesea ca
+        //   <p class="text_obisnuit"><span style="font-family: …; font-size: 14px; font-weight: bold;">…</span></p>
+        // Span-urile care au DOAR atributul style, aflate într-un <p>, sunt desfăcute:
+        //  - bold pe tot paragraful  → <p class="text_obisnuit2">text</p>
+        //  - bold doar pe o bucată   → <span class="text_obisnuit2">bucata</span>
+        //  - italic / underline      → <em> / <u>
+        //  - restul stilului (font, mărime, culoare…) se aruncă.
+        function isAiStyledSpan(el) {
+            if (!el || el.nodeName !== 'SPAN') return false;
+            const attrs = el.attributes;
+            return !!(attrs && attrs.length === 1 && String(attrs[0].name).toLowerCase() === 'style');
+        }
+
+        function paragraphTextIsAllInside(p, test) {
+            const doc = p.ownerDocument;
+            const walker = doc.createTreeWalker(p, NodeFilter.SHOW_TEXT, null);
+            let n, any = false;
+            while ((n = walker.nextNode())) {
+                if (!/\S/.test(n.nodeValue.replace(/ /g, ' '))) continue;
+                any = true;
+                let a = n.parentNode, ok = false;
+                while (a && a !== p) {
+                    if (a.nodeType === 1 && test(a)) { ok = true; break; }
+                    a = a.parentNode;
+                }
+                if (!ok) return false;
+            }
+            return any;
+        }
+
+        function canSwapParagraphToObisnuit2(p) {
+            const cls = (p.getAttribute('class') || '').trim();
+            return !cls || /^text_obisnuit2?$/.test(cls);
+        }
+
+        function cleanAiStyledSpansInParagraph(p) {
+            if (!p || !p.querySelectorAll) return false;
+            const spans = Array.prototype.slice.call(p.querySelectorAll('span[style]')).filter(isAiStyledSpan);
+            if (!spans.length) return false;
+            const doc = p.ownerDocument;
+            const boldRe = /font-weight\s*:\s*(?:bold|bolder|[6-9]00)\b/i;
+            const isBoldSpan = function (el) {
+                return el.nodeName === 'SPAN' && spans.indexOf(el) !== -1 && boldRe.test(el.getAttribute('style') || '');
+            };
+            const wholeBold = canSwapParagraphToObisnuit2(p) && paragraphTextIsAllInside(p, isBoldSpan);
+            const alreadyBold = wholeBold || (p.classList && p.classList.contains('text_obisnuit2'));
+            // Interiorul întâi, ca să nu mutăm noduri dintr-un span deja scos.
+            for (let i = spans.length - 1; i >= 0; i--) {
+                const s = spans[i];
+                const st = s.getAttribute('style') || '';
+                const wrappers = [];
+                if (!alreadyBold && boldRe.test(st)) {
+                    const b = doc.createElement('span');
+                    b.className = 'text_obisnuit2';
+                    wrappers.push(b);
+                }
+                if (/font-style\s*:\s*(?:italic|oblique)/i.test(st) && !s.closest('em, i')) wrappers.push(doc.createElement('em'));
+                if (/text-decoration[\w-]*\s*:[^;]*underline/i.test(st) && !s.closest('u')) wrappers.push(doc.createElement('u'));
+                const parent = s.parentNode;
+                if (!parent) continue;
+                let target = parent, outer = null;
+                if (wrappers.length) {
+                    outer = wrappers[0];
+                    for (let w = 1; w < wrappers.length; w++) wrappers[w - 1].appendChild(wrappers[w]);
+                    target = wrappers[wrappers.length - 1];
+                    parent.insertBefore(outer, s);
+                }
+                while (s.firstChild) {
+                    if (outer) target.appendChild(s.firstChild);
+                    else parent.insertBefore(s.firstChild, s);
+                }
+                parent.removeChild(s);
+            }
+            if (wholeBold) p.className = 'text_obisnuit2';
+            p.normalize();
+            return true;
+        }
+
+        function cleanAiStyledSpansInRoot(root) {
+            if (!root || !root.querySelectorAll) return false;
+            let changed = false;
+            Array.prototype.slice.call(root.querySelectorAll('p')).forEach(function (p) {
+                if (p.querySelector('span[style]') && cleanAiStyledSpansInParagraph(p)) changed = true;
+            });
+            return changed;
+        }
+
+        // Varianta pe text HTML (cod/salvare): întoarce lista de înlocuiri pe paragraf,
+        // ca restul fișierului să rămână neatins (indentare, entități etc.).
+        function computeAiStyledSpanEdits(html) {
+            html = String(html || '');
+            const edits = [];
+            if (!/<span\b[^>]*\bstyle\s*=/i.test(html)) return edits;
+            const re = /<p\b[^>]*>[\s\S]*?<\/p>/gi;
+            let m;
+            while ((m = re.exec(html)) !== null) {
+                if (!/<span\b[^>]*\bstyle\s*=/i.test(m[0])) continue;
+                const tpl = document.createElement('template');
+                tpl.innerHTML = m[0];
+                const p = tpl.content.firstElementChild;
+                if (!p || p.nodeName !== 'P') continue;
+                const oldClass = p.getAttribute('class');
+                if (!cleanAiStyledSpansInParagraph(p)) continue;
+                const pOpen = /^<p\b[^>]*>/i.exec(m[0])[0];
+                let newOpen = pOpen;
+                const newClass = p.getAttribute('class');
+                if (newClass !== oldClass) {
+                    newOpen = /\bclass\s*=/i.test(pOpen)
+                        ? pOpen.replace(/\bclass\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/i, 'class="' + newClass + '"')
+                        : pOpen.replace(/^<p\b/i, '<p class="' + newClass + '"');
+                }
+                edits.push({ from: m.index, to: m.index + m[0].length, text: newOpen + p.innerHTML + '</p>' });
+            }
+            return edits;
+        }
+
+        function cleanAiStyledSpansInHtml(html) {
+            let out = String(html || '');
+            const edits = computeAiStyledSpanEdits(out);
+            for (let i = edits.length - 1; i >= 0; i--) {
+                out = out.slice(0, edits[i].from) + edits[i].text + out.slice(edits[i].to);
+            }
+            return out;
+        }
+
+        // La deschiderea unui fișier: rescrie în cod paragrafele cu stil AI.
+        // Întoarce câte paragrafe a reparat (0 = nimic de făcut).
+        // Marcajele portocalii ale căutării (Find) din Design nu au voie să ajungă în cod.
+        const FIND_MARK_RE = /<mark\b[^>]*\bdata-fr-highlight\b[^>]*>([\s\S]*?)<\/mark>/gi;
+        function stripFindMarksFromHtml(html) {
+            return String(html || '').replace(FIND_MARK_RE, '$1');
+        }
+        function computeFindMarkEdits(html) {
+            const edits = [];
+            const re = new RegExp(FIND_MARK_RE.source, 'gi');
+            let m;
+            while ((m = re.exec(html)) !== null) {
+                edits.push({ from: m.index, to: m.index + m[0].length, text: m[1] });
+            }
+            return edits;
+        }
+
+        function applyEditsToEditor(edits) {
+            if (!edits.length) return;
+            const prevSync = isSyncFromDesign, prevRestore = _isRestoringTab;
+            isSyncFromDesign = true;
+            _isRestoringTab = true;
+            try {
+                editor.operation(() => {
+                    for (let i = edits.length - 1; i >= 0; i--) {
+                        editor.replaceRange(edits[i].text, editor.posFromIndex(edits[i].from), editor.posFromIndex(edits[i].to), '+aiStyleCleanup');
+                    }
+                });
+            } finally {
+                isSyncFromDesign = prevSync;
+                _isRestoringTab = prevRestore;
+            }
+        }
+
+        function cleanAiStyleInOpenedTab(tab, path) {
+            if (!editor) return 0;
+            if (path && !/\.html?$/i.test(path)) return 0;
+            const markEdits = computeFindMarkEdits(editor.getValue());
+            applyEditsToEditor(markEdits);
+            const edits = computeAiStyledSpanEdits(editor.getValue());
+            applyEditsToEditor(edits);
+            const total = markEdits.length + edits.length;
+            if (total && tab) tab.editorContent = editor.getValue();
+            return total;
+        }
+
+        function markTabDirtyAfterAiCleanup(tab, count) {
+            if (!count || !tab) return;
+            tab.isDirty = true;
+            isDirty = true;
+            toast('Am curățat ' + count + ' loc(uri): stil AI (span style) / marcaje de căutare rămase în cod. Salvează ca să rămână.');
+        }
+
+        // ── Butoanele N / B la nivel de paragraf ──
+        function getDesignCaretParagraph() {
+            const iframe = document.getElementById('preview');
+            const win = iframe && iframe.contentWindow;
+            const sel = win && win.getSelection();
+            if (!sel || !sel.rangeCount) return null;
+            let node = sel.getRangeAt(0).startContainer;
+            if (node && node.nodeType !== 1) node = node.parentNode;
+            const p = node && node.closest ? node.closest('p') : null;
+            return p && p.ownerDocument.body && p.ownerDocument.body.contains(p) ? p : null;
+        }
+
+        // true dacă nu e text selectat parțial (doar cursor, sau tot paragraful selectat)
+        function designSelectionIsWholeParagraph(p) {
+            const iframe = document.getElementById('preview');
+            const sel = iframe && iframe.contentWindow && iframe.contentWindow.getSelection();
+            if (!sel || !sel.rangeCount) return false;
+            const range = sel.getRangeAt(0);
+            if (range.collapsed) return true;
+            const norm = function (s) { return String(s || '').replace(/ /g, ' ').replace(/\s+/g, ' ').trim(); };
+            return norm(range.toString()) === norm(p.textContent);
+        }
+
+        function placeCaretAtEnd(el) {
+            const doc = el.ownerDocument;
+            const win = doc.defaultView;
+            const sel = win && win.getSelection();
+            if (!sel) return;
+            const r = doc.createRange();
+            r.selectNodeContents(el);
+            r.collapse(false);
+            sel.removeAllRanges();
+            sel.addRange(r);
+        }
+
+        // Scoate toate tagurile din paragraf, păstrând doar textul, link-urile și <br>.
+        function stripParagraphToPlain(p, keepEmU) {
+            const doc = p.ownerDocument;
+            const keep = keepEmU ? /^(?:A|BR|EM|U)$/ : /^(?:A|BR)$/;
+            Array.prototype.slice.call(p.querySelectorAll('*')).reverse().forEach(function (el) {
+                if (keep.test(el.nodeName)) {
+                    if (el.nodeName !== 'A' && el.nodeName !== 'BR') {
+                        Array.prototype.slice.call(el.attributes).forEach(function (a) { el.removeAttribute(a.name); });
+                    }
+                    return;
+                }
+                const parent = el.parentNode;
+                if (!parent) return;
+                while (el.firstChild) parent.insertBefore(el.firstChild, el);
+                parent.removeChild(el);
+            });
+            if (keepEmU) {
+                Array.prototype.slice.call(p.querySelectorAll('i')).forEach(function (i) {
+                    const em = doc.createElement('em');
+                    while (i.firstChild) em.appendChild(i.firstChild);
+                    i.parentNode.replaceChild(em, i);
+                });
+            }
+            p.normalize();
+        }
+
+        function setDesignParagraphStyle(p, cls) {
+            designPushCurrentState();
+            Array.prototype.slice.call(p.attributes).forEach(function (a) {
+                if (a.name !== 'class') p.removeAttribute(a.name);
+            });
+            // N = paragraf complet curat; B = bold pe tot paragraful, dar păstrează italic/underline
+            stripParagraphToPlain(p, cls === 'text_obisnuit2');
+            p.className = cls;
+            placeCaretAtEnd(p);
+            syncFromDesign();
+            lastDesignSnapshot = getDesignBodyHtml();
+            if (typeof updatePropertiesPanelFromSelection === 'function') {
+                try { updatePropertiesPanelFromSelection(); } catch (e) { }
+            }
+            refreshParagraphStyleButtons();
+        }
+
+        function applyNormalParagraphStyle() {
+            const p = getDesignCaretParagraph();
+            if (!p) { toast('Dă click într-un paragraf din Design.'); return; }
+            setDesignParagraphStyle(p, 'text_obisnuit');
+        }
+
+        // B: text_obisnuit → text_obisnuit2, apoi la al doilea click înapoi la text_obisnuit.
+        // Întoarce false dacă e selectată doar o bucată de text (atunci rămâne bold-ul vechi, pe selecție).
+        function toggleBoldParagraphStyle() {
+            const p = getDesignCaretParagraph();
+            if (!p || !designSelectionIsWholeParagraph(p)) return false;
+            const isBold = p.classList.contains('text_obisnuit2');
+            setDesignParagraphStyle(p, isBold ? 'text_obisnuit' : 'text_obisnuit2');
+            return true;
+        }
+
+        function refreshParagraphStyleButtons() {
+            const p = getDesignCaretParagraph();
+            const isBold = !!(p && p.classList.contains('text_obisnuit2'));
+            const isNormal = !!(p && p.classList.contains('text_obisnuit'));
+            const top = document.getElementById('btnClassObisnuit2');
+            if (top) top.classList.toggle('active', isBold);
+            const nBtn = document.getElementById('btnClassNormal');
+            if (nBtn) nBtn.classList.toggle('active', isNormal);
+            const propB = document.getElementById('propBold');
+            if (propB && isBold) propB.style.background = 'rgba(59,130,246,0.3)';
+        }
+
         function designSelectionHasCssClass(el, className) {
             if (!el || !className) return false;
             var node = el;
@@ -7800,6 +9028,11 @@ if (isset($_GET['action'])) {
                 'body[contenteditable=\"true\"] p.text_obisnuit,' +
                 'body[contenteditable=\"true\"] p.text_obisnuit2 {' +
                 ' white-space: break-spaces !important;' +
+                '}' +
+                // CSS-ul site-ului (ro) are `.text_obisnuit span.text_obisnuit2 { white-space: nowrap }`:
+                // un bold lung ar ieși din ramă în Design. Aici îl lăsăm să se rupă pe rânduri.
+                'body[contenteditable=\"true\"] p span.text_obisnuit2 {' +
+                ' white-space: inherit !important;' +
                 '}';
             doc.head.appendChild(st);
         }
@@ -7886,11 +9119,14 @@ if (isset($_GET['action'])) {
             clearSasaDesignHighlight(doc);
             cleanupParagraphBoundaryBrArtifacts(doc);
             removePasteWhitespaceNormalSpansFromDom(doc.body);
+            cleanAiStyledSpansInRoot(doc.body);
             // Replace &nbsp; with regular space in SASA region and h1.den_articol
             var rawInner = cleanNbspInHtml(doc.body.innerHTML);
             rawInner = removePasteWhitespaceNormalSpansFromHtml(rawInner);
             // Remove data-orig-class helper attribute so it never persists to saved code
             rawInner = rawInner.replace(/\s*data-orig-class="[^"]*"/gi, '');
+            // Marcajele Find din Design rămân doar în Design, nu intră în cod
+            rawInner = stripFindMarksFromHtml(rawInner);
             // Safety net: fold accidental orphan text back into the emptied block
             // tag next to it ("<p ...></p>text" / "<h1 ...></h1>text" become
             // "<p ...>text</p>" / "<h1 ...>text</h1>"). This shape appears when a
@@ -8131,8 +9367,8 @@ if (isset($_GET['action'])) {
                     try {
                         const nodeRange = doc.createRange();
                         nodeRange.selectNode(node);
-                        return range.compareBoundaryPoints(Range.START_TO_END, nodeRange) < 0 &&
-                            range.compareBoundaryPoints(Range.END_TO_START, nodeRange) > 0;
+                        return range.compareBoundaryPoints(Range.START_TO_END, nodeRange) > 0 &&
+                            range.compareBoundaryPoints(Range.END_TO_START, nodeRange) < 0;
                     } catch (_) {
                         return false;
                     }
@@ -8337,6 +9573,7 @@ if (isset($_GET['action'])) {
 
             function finishPlainTextPaste() {
                 removePasteWhitespaceNormalSpansFromDom(doc.body);
+                cleanAiStyledSpansInRoot(doc.body);
                 cleanupParagraphBoundaryBrArtifacts(doc);
                 clearTimeout(designInputDebounceTimer);
                 designInputDebounceTimer = setTimeout(syncFromDesign, 80);
@@ -8529,7 +9766,7 @@ if (isset($_GET['action'])) {
                 clearTimeout(_selChangeTimer);
                 _selChangeTimer = setTimeout(() => {
                     rememberDesignSelectionRange(iframe.contentWindow, doc);
-                    if (!isSelectionFromCode) updatePropertiesPanelFromSelection();
+                    if (!isSelectionFromCode && !(window._frNavigatingUntil > Date.now())) updatePropertiesPanelFromSelection();
                 }, 60);
             });
             doc.addEventListener('mouseup', () => {
@@ -9217,6 +10454,48 @@ if (isset($_GET['action'])) {
             body.textContent = text;
             return dlg;
         }
+        // fereastra proprie de confirmare (in locul confirm()-ului din Chrome) → Promise<true|false>
+        function confirmEmailDialog(info) {
+            return new Promise(function (resolve) {
+                const old = document.getElementById('emailConfirmDialog');
+                if (old) old.remove();
+                const esc = function (s) { return String(s || '').replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+                const dlg = document.createElement('div');
+                dlg.id = 'emailConfirmDialog';
+                dlg.style.cssText = 'position:fixed;inset:0;z-index:100003;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55);backdrop-filter:blur(2px)';
+                dlg.innerHTML =
+                    '<div style="width:min(520px,calc(100% - 32px));background:#1f2330;border:1px solid #3a4152;border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.6);font-family:Segoe UI,Arial,sans-serif;overflow:hidden">' +
+                    '<div style="display:flex;align-items:center;gap:12px;padding:18px 22px 6px">' +
+                    '<span style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:50%;background:rgba(34,197,94,.15);font-size:20px">✉️</span>' +
+                    '<b style="color:#f1f5f9;font-size:19px">Trimit articolul pe email?</b></div>' +
+                    '<div style="padding:8px 22px 4px;color:#94a3b8;font-size:14px">Ultimul articol din <code style="color:#cbd5e1">ro/index.html</code>:</div>' +
+                    '<div style="margin:10px 22px 4px;padding:14px 16px;background:#161a24;border:1px solid #2f3646;border-left:4px solid #22c55e;border-radius:8px">' +
+                    (info.title ? '<div style="color:#f8fafc;font-size:17px;font-weight:600;margin-bottom:6px">' + esc(info.title) + '</div>' : '') +
+                    '<a href="' + esc(info.link) + '" target="_blank" rel="noopener" style="color:#38bdf8;font-size:14px;word-break:break-all;text-decoration:none">' + esc(info.link) + '</a></div>' +
+                    '<div style="display:flex;justify-content:flex-end;gap:10px;padding:18px 22px 20px">' +
+                    '<button type="button" class="ecf-cancel" style="padding:9px 20px;border-radius:8px;border:1px solid #475066;background:transparent;color:#e2e8f0;font-size:15px;cursor:pointer">Anulează</button>' +
+                    '<button type="button" class="ecf-ok" style="padding:9px 22px;border-radius:8px;border:0;background:#16a34a;color:#fff;font-size:15px;font-weight:600;cursor:pointer">Trimite e-mail</button>' +
+                    '</div></div>';
+                document.body.appendChild(dlg);
+                const done = function (val) {
+                    document.removeEventListener('keydown', onKey, true);
+                    dlg.remove();
+                    resolve(val);
+                };
+                const onKey = function (e) {
+                    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); }
+                    else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); done(true); }
+                };
+                document.addEventListener('keydown', onKey, true);
+                dlg.querySelector('.ecf-ok').onclick = function () { done(true); };
+                dlg.querySelector('.ecf-cancel').onclick = function () { done(false); };
+                dlg.addEventListener('click', function (e) { if (e.target === dlg) done(false); });
+                const ok = dlg.querySelector('.ecf-ok');
+                ok.onmouseenter = function () { ok.style.background = '#15803d'; };
+                ok.onmouseleave = function () { ok.style.background = '#16a34a'; };
+                ok.focus();
+            });
+        }
         async function sendLatestArticleEmail() {
             const btn = document.getElementById('btnSendArticleEmail');
             if (btn && btn.disabled) return;
@@ -9233,8 +10512,7 @@ if (isset($_GET['action'])) {
                 showErrorPopup('Nu am găsit niciun articol la începutul listei din ro/index.html.\nNu trimit nimic.');
                 return;
             }
-            if (!window.confirm('Trimit pe email ultimul articol din index?\n\n' +
-                (info.title ? info.title + '\n' : '') + info.link)) return;
+            if (!await confirmEmailDialog(info)) return;
             if (btn) { btn.disabled = true; btn.style.opacity = '.6'; }
             const dlg = showEmailConsole('Trimite E-mail', 'Se trimite emailul în fundal...\n\n' + info.link, '#facc15');
             dlg.dataset.busy = '1';
@@ -9860,6 +11138,44 @@ if (isset($_GET['action'])) {
             }
         }
 
+        // Starea bold/italic/underline a textului selectat (null dacă e doar cursor).
+        function getSelectionTextFormatState() {
+            const iframe = document.getElementById('preview');
+            const win = iframe && iframe.contentWindow;
+            const doc = iframe && iframe.contentDocument;
+            const sel = win && win.getSelection();
+            if (!sel || !sel.rangeCount) return null;
+            const range = sel.getRangeAt(0);
+            if (range.collapsed || !range.toString().trim()) return null;
+            const nodes = [];
+            const root = range.commonAncestorContainer;
+            if (root.nodeType === 3) {
+                nodes.push(root);
+            } else {
+                const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+                let n;
+                while ((n = walker.nextNode())) {
+                    if (!n.nodeValue || !n.nodeValue.trim()) continue;
+                    const tr = doc.createRange();
+                    tr.selectNodeContents(n);
+                    if (rangesOverlap(range, tr)) nodes.push(n);
+                }
+            }
+            if (!nodes.length) return null;
+            const state = { bold: true, italic: true, underline: true };
+            nodes.forEach(function (n) {
+                const el = n.parentElement;
+                if (!el) return;
+                const cs = win.getComputedStyle(el);
+                if (!(cs.fontWeight === 'bold' || parseInt(cs.fontWeight, 10) >= 600)) state.bold = false;
+                if (cs.fontStyle !== 'italic' && cs.fontStyle !== 'oblique') state.italic = false;
+                // text-decoration nu se moștenește în computed style → căutăm <u> deasupra
+                if (!closestInlineFormatElement(el, 'u') &&
+                    (cs.textDecorationLine || '').indexOf('underline') === -1) state.underline = false;
+            });
+            return state;
+        }
+
         function updatePropertiesPanelFromSelection() {
             const el = getDesignSelection();
             const fontSel = document.getElementById('propFont');
@@ -9918,9 +11234,20 @@ if (isset($_GET['action'])) {
             } else {
                 sizeSel.value = '';
             }
-            boldBtn.style.background = (computed.fontWeight === '700' || computed.fontWeight === 'bold') ? 'rgba(59,130,246,0.3)' : '';
-            italicBtn.style.background = computed.fontStyle === 'italic' ? 'rgba(59,130,246,0.3)' : '';
-            if (underlineBtn) underlineBtn.style.background = ((computed.textDecorationLine || computed.textDecoration || '').indexOf('underline') !== -1) ? 'rgba(59,130,246,0.3)' : '';
+            let isBoldNow = (computed.fontWeight === '700' || computed.fontWeight === 'bold' || parseInt(computed.fontWeight, 10) >= 600);
+            let isItalicNow = computed.fontStyle === 'italic';
+            let isUnderNow = (computed.textDecorationLine || computed.textDecoration || '').indexOf('underline') !== -1;
+            // Text selectat cu mouse-ul: începutul selecției e adesea în <p>, nu în <em>.
+            // Butonul e aprins doar dacă TOT textul selectat are formatul.
+            const selState = getSelectionTextFormatState();
+            if (selState) {
+                isBoldNow = selState.bold;
+                isItalicNow = selState.italic;
+                isUnderNow = selState.underline;
+            }
+            boldBtn.style.background = isBoldNow ? 'rgba(59,130,246,0.3)' : '';
+            italicBtn.style.background = isItalicNow ? 'rgba(59,130,246,0.3)' : '';
+            if (underlineBtn) underlineBtn.style.background = isUnderNow ? 'rgba(59,130,246,0.3)' : '';
             const quickItalicBtn = document.getElementById('btnQuickItalic');
             if (quickItalicBtn) quickItalicBtn.style.background = italicBtn.style.background;
             const quickUnderlineBtn = document.getElementById('btnQuickUnderline');
@@ -9943,6 +11270,11 @@ if (isset($_GET['action'])) {
                 quickClassBtn.dataset.className = 'text_obisnuit2';
                 const hasClass = designSelectionHasCssClass(el, 'text_obisnuit2');
                 quickClassBtn.classList.toggle('active', hasClass);
+            }
+            const normalClassBtn = document.getElementById('btnClassNormal');
+            if (normalClassBtn) {
+                const _np = el && el.closest ? el.closest('p') : null;
+                normalClassBtn.classList.toggle('active', !!(_np && _np.classList.contains('text_obisnuit')));
             }
             // Link / Target
             var linkInp = document.getElementById('propLink');
@@ -10095,9 +11427,73 @@ if (isset($_GET['action'])) {
             });
         }
 
+        // a.compareBoundaryPoints(START_TO_END, b) compară sfârșitul lui a cu începutul lui b;
+        // END_TO_START compară începutul lui a cu sfârșitul lui b.
         function rangesOverlap(a, b) {
-            return a.compareBoundaryPoints(Range.START_TO_END, b) < 0 &&
-                a.compareBoundaryPoints(Range.END_TO_START, b) > 0;
+            return a.compareBoundaryPoints(Range.START_TO_END, b) > 0 &&
+                a.compareBoundaryPoints(Range.END_TO_START, b) < 0;
+        }
+
+        // Scoate formatul (em/strong/u) DOAR de pe textul din range: tagurile care
+        // cuprind și text din afara selecției sunt tăiate în două, nu desfăcute de tot.
+        function removeInlineFormatFromRange(doc, sel, range, block, tagName) {
+            const selector = inlineFormatSelector(tagName);
+            const elOf = n => (n && n.nodeType === 3 ? n.parentElement : n);
+            const unwrap = el => {
+                const par = el.parentNode;
+                if (!par) return;
+                while (el.firstChild) par.insertBefore(el.firstChild, el);
+                par.removeChild(el);
+            };
+            const frag = range.extractContents();
+            Array.prototype.slice.call(frag.querySelectorAll(selector)).reverse().forEach(unwrap);
+            let f = elOf(range.startContainer);
+            f = f && f !== block && f.closest ? f.closest(selector) : null;
+            while (f && f !== block && block.contains(f)) {
+                const after = doc.createRange();
+                after.setStart(range.startContainer, range.startOffset);
+                after.setEnd(f, f.childNodes.length);
+                const afterFrag = after.extractContents();
+                const clone = f.cloneNode(false);
+                clone.appendChild(afterFrag);
+                f.parentNode.insertBefore(clone, f.nextSibling);
+                range.setStartAfter(f);
+                range.collapse(true);
+                const par = f.parentNode;
+                if (!f.textContent) f.parentNode.removeChild(f);
+                if (!clone.textContent) clone.parentNode.removeChild(clone);
+                f = par && par !== block && par.closest ? par.closest(selector) : null;
+            }
+            const first = frag.firstChild, last = frag.lastChild;
+            range.insertNode(frag);
+            Array.prototype.slice.call(block.querySelectorAll(selector)).forEach(el => {
+                if (!el.textContent) el.parentNode.removeChild(el);
+            });
+            if (sel && first && last && first.parentNode && last.parentNode) {
+                const r = doc.createRange();
+                r.setStartBefore(first);
+                r.setEndAfter(last);
+                sel.removeAllRanges();
+                sel.addRange(r);
+            }
+        }
+
+        // Pune formatul pe range fără să lase taguri dublate (<em><em>…</em></em>).
+        function wrapRangeWithFormatClean(doc, range, block, tagName) {
+            const selector = inlineFormatSelector(tagName);
+            const frag = range.extractContents();
+            Array.prototype.slice.call(frag.querySelectorAll(selector)).reverse().forEach(el => {
+                const par = el.parentNode;
+                while (el.firstChild) par.insertBefore(el.firstChild, el);
+                par.removeChild(el);
+            });
+            const wrapper = doc.createElement(tagName);
+            wrapper.appendChild(frag);
+            range.insertNode(wrapper);
+            Array.prototype.slice.call(block.querySelectorAll(selector)).forEach(el => {
+                if (!el.textContent) el.parentNode.removeChild(el);
+            });
+            return wrapper;
         }
 
         function rangeIntersectsNonEmptyText(doc, range, root) {
@@ -10331,12 +11727,12 @@ if (isset($_GET['action'])) {
             var lastSelected = null;
             ranges.forEach(function (item) {
                 if (shouldUnwrap) {
-                    unwrapFormatInBlock(item.block, tagName);
+                    removeInlineFormatFromRange(doc, null, item.range, item.block, tagName);
                     if (!firstSelected) firstSelected = item.block;
                     lastSelected = item.block;
                     return;
                 }
-                var wrapper = wrapRangeContentsWithTag(doc, item.range, tagName);
+                var wrapper = wrapRangeWithFormatClean(doc, item.range, item.block, tagName);
                 if (!firstSelected) firstSelected = wrapper;
                 lastSelected = wrapper;
             });
@@ -10381,28 +11777,11 @@ if (isset($_GET['action'])) {
                             lastDesignSnapshot = getDesignBodyHtml();
                             return;
                         }
-                        const selectedTextInBlock = blockRange.toString();
                         if (selectedBlockTextNodesHaveFormat(doc, blockRange, tagName)) {
-                            const fmt = closestInlineFormatElement(blockRange.startContainer, tagName);
-                            const endFmt = closestInlineFormatElement(blockRange.endContainer, tagName);
-                            if (fmt && fmt === endFmt && fmt !== block) {
-                                const parent = fmt.parentNode;
-                                while (fmt.firstChild) parent.insertBefore(fmt.firstChild, fmt);
-                                parent.removeChild(fmt);
-                                parent.normalize();
-                                if (selectedTextInBlock) {
-                                    const newRange = findTextRangeInNode(doc, parent, selectedTextInBlock);
-                                    if (newRange) { sel.removeAllRanges(); sel.addRange(newRange); }
-                                }
-                            } else {
-                                unwrapFormatInBlock(block, tagName);
-                                if (selectedTextInBlock) {
-                                    const newRange = findTextRangeInNode(doc, block, selectedTextInBlock);
-                                    if (newRange) { sel.removeAllRanges(); sel.addRange(newRange); }
-                                }
-                            }
+                            // Selecția e deja italic/bold/underline → scoate formatul doar de pe ea
+                            removeInlineFormatFromRange(doc, sel, blockRange, block, tagName);
                         } else {
-                            const wrapper = wrapRangeContentsWithTag(doc, blockRange, tagName);
+                            const wrapper = wrapRangeWithFormatClean(doc, blockRange, block, tagName);
                             sel.removeAllRanges();
                             const newRange = doc.createRange();
                             newRange.selectNodeContents(wrapper);
@@ -10506,13 +11885,104 @@ if (isset($_GET['action'])) {
             return range;
         }
 
-        function applyClassProperty(value) {
+        // Span „de formatare”: are doar class / style (nu e un span cu id, data-* etc.)
+        function isFormattingSpan(el) {
+            if (!el || el.nodeName !== 'SPAN') return false;
+            return Array.prototype.every.call(el.attributes, function (a) {
+                return /^(?:class|style|data-orig-class)$/i.test(a.name);
+            });
+        }
+
+        function unwrapFormattingSpans(root) {
+            if (!root || !root.querySelectorAll) return;
+            Array.prototype.slice.call(root.querySelectorAll('span')).reverse().forEach(function (s) {
+                if (!isFormattingSpan(s)) return;
+                const par = s.parentNode;
+                if (!par) return;
+                while (s.firstChild) par.insertBefore(s.firstChild, s);
+                par.removeChild(s);
+            });
+            if (root.normalize) root.normalize();
+        }
+
+        function removeEmptyFormattingSpans(root) {
+            Array.prototype.slice.call(root.querySelectorAll('span')).forEach(function (s) {
+                if (isFormattingSpan(s) && !s.textContent && !s.querySelector('img, br')) s.parentNode.removeChild(s);
+            });
+        }
+
+        // Clasa aleasă din listă pe o bucată de text dintr-un paragraf: cuvintele selectate
+        // primesc DOAR clasa nouă, indiferent ce span-uri/clase aveau înainte. Span-ul în
+        // care se află selecția e tăiat în două (înainte / după), ca să nu rămână imbricat.
+        function applyClassToPartialSelection(doc, sel, range, value) {
+            const BLOCK_SEL = 'p,div,h1,h2,h3,h4,h5,h6,li,td,th,blockquote,pre';
+            const elOf = n => (n && n.nodeType === 3 ? n.parentElement : n);
+            const startEl = elOf(range.startContainer);
+            const block = startEl && startEl.closest ? startEl.closest(BLOCK_SEL) : null;
+            if (!block || !block.contains(range.endContainer)) return false;
+
+            const frag = range.extractContents();
+            unwrapFormattingSpans(frag);
+
+            // Taie span-urile de formatare care încă înconjoară punctul de inserare
+            let s = elOf(range.startContainer);
+            s = s && s !== block ? s.closest('span') : null;
+            while (s && s !== block && block.contains(s) && isFormattingSpan(s)) {
+                const after = doc.createRange();
+                after.setStart(range.startContainer, range.startOffset);
+                after.setEnd(s, s.childNodes.length);
+                const afterFrag = after.extractContents();
+                const clone = s.cloneNode(false);
+                clone.appendChild(afterFrag);
+                s.parentNode.insertBefore(clone, s.nextSibling);
+                range.setStartAfter(s);
+                range.collapse(true);
+                const next = s.parentNode && s.parentNode !== block && s.parentNode.closest
+                    ? s.parentNode.closest('span') : null;
+                if (!clone.textContent) clone.parentNode.removeChild(clone);
+                s = next;
+            }
+
+            // Dacă clasa aleasă e chiar clasa paragrafului, textul rămâne simplu (o moștenește)
+            const blockClass = (block.className || '').trim().split(/\s+/)[0];
+            let inserted;
+            if (value && value !== blockClass) {
+                inserted = doc.createElement('span');
+                inserted.className = value;
+                inserted.appendChild(frag);
+                range.insertNode(inserted);
+            } else {
+                inserted = doc.createElement('span'); // marcaj temporar pentru selecție
+                inserted.appendChild(frag);
+                range.insertNode(inserted);
+            }
+            removeEmptyFormattingSpans(block);
+            const r = doc.createRange();
+            if (inserted.className) {
+                r.selectNodeContents(inserted);
+            } else {
+                const first = inserted.firstChild, last = inserted.lastChild;
+                const par = inserted.parentNode;
+                while (inserted.firstChild) par.insertBefore(inserted.firstChild, inserted);
+                par.removeChild(inserted);
+                if (first && last) { r.setStartBefore(first); r.setEndAfter(last); }
+            }
+            sel.removeAllRanges();
+            sel.addRange(r);
+            return true;
+        }
+
+        // opts.fromDropdown: alegere din lista de clase CSS → aplică (nu comută) și
+        // scoate toate span-urile de formatare din bucata selectată.
+        function applyClassProperty(value, opts) {
+            const fromDropdown = !!(opts && opts.fromDropdown);
             // Push the current body state BEFORE the change so undo can revert it
             designPushCurrentState();
             const info = getDesignSelectionRange();
             if (info && !info.range.collapsed) {
                 const { doc, sel, range } = info;
                 const selectedText = range.toString();
+                const normSel = s => String(s || '').replace(/ /g, ' ').replace(/\s+/g, ' ').trim();
                 let ancestor = range.commonAncestorContainer;
                 if (ancestor.nodeType === 3) ancestor = ancestor.parentElement;
 
@@ -10530,7 +12000,7 @@ if (isset($_GET['action'])) {
                 //       wrapped in a <span>, producing invalid <span><p>…</p></span>.
                 let targetBlock = null;
                 if (BLOCK_TAGS.has((ancestor.tagName || '').toLowerCase()) &&
-                    selectedText.trim() === ancestor.textContent.trim()) {
+                    normSel(selectedText) === normSel(ancestor.textContent)) {
                     targetBlock = ancestor;
                 } else {
                     // Resolve the block sitting at the start of the selection.
@@ -10545,9 +12015,25 @@ if (isset($_GET['action'])) {
                             ? startNode
                             : (startNode.closest ? startNode.closest(BLOCK_SEL) : null);
                     }
-                    if (candidate && selectedText.trim() === candidate.textContent.trim()) {
+                    if (candidate && normSel(selectedText) === normSel(candidate.textContent)) {
                         targetBlock = candidate;
                     }
+                }
+
+                if (targetBlock && fromDropdown && value) {
+                    // Tot paragraful selectat → tot paragraful în clasa aleasă,
+                    // fără span-uri cu alte clase/stiluri rămase înăuntru.
+                    targetBlock.removeAttribute('data-orig-class');
+                    targetBlock.className = value;
+                    unwrapFormattingSpans(targetBlock);
+                    syncFromDesign();
+                    lastDesignSnapshot = getDesignBodyHtml();
+                    const newRange = doc.createRange();
+                    newRange.selectNodeContents(targetBlock);
+                    sel.removeAllRanges();
+                    sel.addRange(newRange);
+                    rememberDesignSelectionRange(doc.defaultView, doc);
+                    return;
                 }
 
                 if (targetBlock) {
@@ -10583,6 +12069,14 @@ if (isset($_GET['action'])) {
                     newRange.selectNodeContents(targetBlock);
                     sel.removeAllRanges();
                     sel.addRange(newRange);
+                    rememberDesignSelectionRange(doc.defaultView, doc);
+                    return;
+                }
+
+                // Din listă, câteva cuvinte dintr-un paragraf → doar ele primesc clasa nouă
+                if (fromDropdown && value && applyClassToPartialSelection(doc, sel, range, value)) {
+                    syncFromDesign();
+                    lastDesignSnapshot = getDesignBodyHtml();
                     rememberDesignSelectionRange(doc.defaultView, doc);
                     return;
                 }
@@ -10635,11 +12129,15 @@ if (isset($_GET['action'])) {
                                 b.setAttribute('data-orig-class', b.className || '');
                             }
                             b.className = value;
-                            b.querySelectorAll('span.' + value).forEach(span => {
-                                const parent = span.parentNode;
-                                while (span.firstChild) parent.insertBefore(span.firstChild, span);
-                                parent.removeChild(span);
-                            });
+                            if (fromDropdown) {
+                                unwrapFormattingSpans(b);
+                            } else {
+                                b.querySelectorAll('span.' + value).forEach(span => {
+                                    const parent = span.parentNode;
+                                    while (span.firstChild) parent.insertBefore(span.firstChild, span);
+                                    parent.removeChild(span);
+                                });
+                            }
                             b.normalize();
                         });
                         syncFromDesign();
@@ -10752,6 +12250,7 @@ if (isset($_GET['action'])) {
                 isSyncFromDesign = false;
                 _isRestoringTab = false;
                 editor.getDoc().clearHistory();
+                const aiFixedPath = cleanAiStyleInOpenedTab(tab, data.file);
                 lastPreviewHadBody = tab.lastPreviewHadBody;
                 clearTimeout(previewDebounceTimer);
                 previewDebounceTimer = null;
@@ -10761,6 +12260,7 @@ if (isset($_GET['action'])) {
                 designUndoStack = [];
                 designRedoStack = [];
                 lastDesignSnapshot = null;
+                markTabDirtyAfterAiCleanup(tab, aiFixedPath);
 
                 setViewMode('design');
                 renderTabs();
@@ -10830,6 +12330,7 @@ if (isset($_GET['action'])) {
                 isSyncFromDesign = false;
                 _isRestoringTab = false;
                 editor.getDoc().clearHistory();
+                const aiFixedDrop = cleanAiStyleInOpenedTab(tab, file.name);
                 lastPreviewHadBody = tab.lastPreviewHadBody;
                 clearTimeout(previewDebounceTimer);
                 previewDebounceTimer = null;
@@ -10839,6 +12340,7 @@ if (isset($_GET['action'])) {
                 designUndoStack = [];
                 designRedoStack = [];
                 lastDesignSnapshot = null;
+                markTabDirtyAfterAiCleanup(tab, aiFixedDrop);
 
                 setViewMode('design');
                 renderTabs();
@@ -10979,16 +12481,34 @@ if (isset($_GET['action'])) {
             }
 
             // Make popups draggable/resizable (especially translation panel)
-            function makeDialogDraggable(el) {
+            function makeDialogDraggable(el, storageKey) {
                 if (!el) return;
                 el.classList.add('resizable');
                 const header = el.querySelector('.drag-handle') || el.querySelector('h4');
                 if (!header) return;
+                header.style.cursor = 'move';
                 let dragging = false;
                 let startX = 0, startY = 0, startLeft = 0, startTop = 0;
 
+                // Poziția salvată (ex. fereastra Find rămâne unde ai mutat-o)
+                if (storageKey) {
+                    try {
+                        const pos = JSON.parse(localStorage.getItem(storageKey) || 'null');
+                        if (pos && isFinite(pos.left) && isFinite(pos.top)) {
+                            el.style.left = Math.max(0, Math.min(pos.left, window.innerWidth - 80)) + 'px';
+                            el.style.top = Math.max(40, Math.min(pos.top, window.innerHeight - 60)) + 'px';
+                            el.style.right = 'auto';
+                            el.style.bottom = 'auto';
+                        }
+                    } catch (e) { }
+                }
+
                 header.addEventListener('mousedown', function (e) {
+                    if (e.button !== 0 || (e.target.closest && e.target.closest('button'))) return;
+                    e.preventDefault();
                     dragging = true;
+                    // Iframe-ul Design ar „înghiți” mișcarea mouse-ului în timpul tragerii
+                    document.querySelectorAll('iframe').forEach(f => { f.dataset.frPe = f.style.pointerEvents || ''; f.style.pointerEvents = 'none'; });
                     const rect = el.getBoundingClientRect();
                     startX = e.clientX;
                     startY = e.clientY;
@@ -11022,10 +12542,20 @@ if (isset($_GET['action'])) {
                     if (dragging) {
                         dragging = false;
                         document.body.style.userSelect = '';
+                        document.querySelectorAll('iframe').forEach(f => { f.style.pointerEvents = f.dataset.frPe || ''; delete f.dataset.frPe; });
+                        if (storageKey) {
+                            try {
+                                localStorage.setItem(storageKey, JSON.stringify({
+                                    left: parseFloat(el.style.left) || 0,
+                                    top: parseFloat(el.style.top) || 0
+                                }));
+                            } catch (e) { }
+                        }
                     }
                 });
             }
 
+            makeDialogDraggable(document.getElementById('findReplaceDialog'), 'htmlEditorFindDialogPos');
             makeDialogDraggable(document.getElementById('translatePopup'));
             makeDialogDraggable(document.getElementById('diacPopup'));
 
@@ -11112,10 +12642,12 @@ if (isset($_GET['action'])) {
             });
 
             document.getElementById('propFont').addEventListener('change', () => applyFontProperty('fontFamily', document.getElementById('propFont').value));
-            document.getElementById('propClass').addEventListener('change', () => applyClassProperty(document.getElementById('propClass').value));
+            document.getElementById('propClass').addEventListener('change', () => applyClassProperty(document.getElementById('propClass').value, { fromDropdown: true }));
             document.getElementById('propSize').addEventListener('change', () => applyFontProperty('fontSize', document.getElementById('propSize').value));
             document.getElementById('propBold').addEventListener('mousedown', e => e.preventDefault());
             document.getElementById('propBold').addEventListener('click', () => {
+                // Cursor în paragraf (sau tot paragraful selectat) → comută text_obisnuit2 / text_obisnuit
+                if (toggleBoldParagraphStyle()) return;
                 toggleInlineFormat('bold');
             });
             document.getElementById('propItalic').addEventListener('mousedown', e => e.preventDefault());
@@ -11143,11 +12675,18 @@ if (isset($_GET['action'])) {
                     toggleInlineFormat('underline');
                 });
             }
-            // Shortcut în topbar: B lângă Redo → aplică clasa text_obisnuit2 pe selecția din Design
+            // N: paragraful cu cursorul devine <p class="text_obisnuit"> (fără alte taguri)
+            const normalClassBtn = document.getElementById('btnClassNormal');
+            if (normalClassBtn) {
+                normalClassBtn.addEventListener('mousedown', e => e.preventDefault());
+                normalClassBtn.addEventListener('click', applyNormalParagraphStyle);
+            }
+            // Shortcut în topbar: B lângă Redo → comută paragraful text_obisnuit2 / text_obisnuit
             const quickClassBtn = document.getElementById('btnClassObisnuit2');
             if (quickClassBtn) {
                 quickClassBtn.addEventListener('mousedown', e => e.preventDefault());
                 quickClassBtn.addEventListener('click', () => {
+                    if (toggleBoldParagraphStyle()) return;
                     const targetClass = quickClassBtn.dataset.className || 'text_obisnuit2';
                     applyClassProperty(targetClass);
                     const el = getDesignSelection();
