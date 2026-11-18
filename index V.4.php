@@ -286,7 +286,7 @@ function sort_list_blocks_by_date_php($html)
         $e = strpos($html, $em, $pos);
         if ($e !== false && $e < $end) $end = $e;
     }
-    $re = '/\G(\s*)(<table\s[^>]*\bwidth\s*=\s*["\'][^"\']+["\'][^>]*>.*?<\/table>\s*<p\s+class\s*=\s*["\']text_obisnuit2["\'][^>]*>.*?<\/p>\s*'
+    $re = '/\G((?:\s|<p\s+class\s*=\s*["\']text_obisnuit["\'][^>]*>\s*<\/p>)*)(<table\s[^>]*\bwidth\s*=\s*["\'][^"\']+["\'][^>]*>.*?<\/table>\s*<p\s+class\s*=\s*["\']text_obisnuit2["\'][^>]*>.*?<\/p>\s*'
         . '<table\s[^>]*\bwidth\s*=\s*["\'][^"\']+["\'][^>]*>.*?<\/table>\s*<p\s+class\s*=\s*["\']text_obisnuit["\'][^>]*>\s*<\/p>)/is';
     $blocks = [];
     while ($pos < $end && preg_match($re, $html, $m, PREG_OFFSET_CAPTURE, $pos) && $m[0][1] + strlen($m[0][0]) <= $end) {
@@ -982,8 +982,11 @@ if (isset($_GET['action'])) {
         }
         $out = [];
         foreach (scan_article_dates_cached($dir) as $a) {
+            // created = data creării fișierului (pe Windows filectime e data creării): în fiecare grup
+            // de date duble, cel mai nou fișier e cel la care se propune schimbarea datei
             $out[] = ['file' => $a['file'], 'ts' => $a['ts'], 'date' => $a['date'], 'cat' => $a['cat'], 'catName' => $a['catName'],
-                'listed' => isset($listed[strtolower(basename($a['file']))])];
+                'listed' => isset($listed[strtolower(basename($a['file']))]),
+                'created' => (int) @filectime($a['file']), 'mtime' => (int) $a['mtime']];
         }
         echo json_encode(['ok' => true, 'dir' => $dir, 'today' => mktime(0, 0, 0), 'articles' => $out], JSON_UNESCAPED_UNICODE);
         exit;
@@ -4499,7 +4502,9 @@ if (isset($_GET['action'])) {
             document.getElementById('translatePopup').classList.remove('visible');
         }
 
-        const CATEGORY_ARTICLE_BLOCK_RE = /^(\s*)(<table\s[^>]*\bwidth\s*=\s*["'][^"']+["'][^>]*>[\s\S]*?<\/table>\s*<p\s+class\s*=\s*["']text_obisnuit2["'][^>]*>[\s\S]*?<\/p>\s*<table\s[^>]*\bwidth\s*=\s*["'][^"']+["'][^>]*>[\s\S]*?<\/table>\s*<p\s+class\s*=\s*["']text_obisnuit["'][^>]*>\s*<\/p>)/i;
+        // Spațiul dinaintea unui bloc poate conține și paragrafe goale în plus (<p class="text_obisnuit"></p>);
+        // altfel citirea listei se oprea la ele și restul articolelor nu mai erau văzute.
+        const CATEGORY_ARTICLE_BLOCK_RE = /^((?:\s|<p\s+class\s*=\s*["']text_obisnuit["'][^>]*>\s*<\/p>)*)(<table\s[^>]*\bwidth\s*=\s*["'][^"']+["'][^>]*>[\s\S]*?<\/table>\s*<p\s+class\s*=\s*["']text_obisnuit2["'][^>]*>[\s\S]*?<\/p>\s*<table\s[^>]*\bwidth\s*=\s*["'][^"']+["'][^>]*>[\s\S]*?<\/table>\s*<p\s+class\s*=\s*["']text_obisnuit["'][^>]*>\s*<\/p>)/i;
 
         const MARKER_CATEGORIE_START = '<!-- ARTICOL CATEGORIE START -->';
         const MARKER_CATEGORIE_FINAL = '<!-- ARTICOL CATEGORIE FINAL -->';
@@ -4881,6 +4886,11 @@ if (isset($_GET['action'])) {
 
             let title = '';
             const h1M = html.match(/<h1\b[^>]*\bclass\s*=\s*["'][^"']*\bden_articol\b[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i);
+            // Doar articolele au <h1 class="den_articol">. index.html și paginile de categorie nu au —
+            // fără această oprire, la Save pe index.html se insera un bloc „index” într-o categorie.
+            if (!h1M) {
+                return { ok: false, msg: 'Nu este o pagină de articol (lipsește &lt;h1 class=&quot;den_articol&quot;&gt;).' };
+            }
             if (h1M) {
                 title = cleanArticleListTitle(plainTextFromEmInnerHtml(h1M[1]));
             }
@@ -5537,6 +5547,12 @@ if (isset($_GET['action'])) {
             const enPath = enDir + '/' + enName;
             const enHtml = await dateSyncLoad(enPath);
             if (enHtml === null) return; // traducerea lipsește încă
+            // Siguranță: FLAGS-ul en trebuie să trimită înapoi la ACEST articol ro. Un articol nou,
+            // copiat dintr-unul vechi, păstrează FLAGS-ul vechi → nu atingem traducerea altui articol.
+            const roName = String(roPath).replace(/\\/g, '/').split('/').pop().toLowerCase();
+            const enFlags = /<!--\s*FLAGS_1\s*-->([\s\S]*?)<!--\s*FLAGS\s*-->/i.exec(enHtml);
+            const back = /href\s*=\s*["']https?:\/\/(?:www\.)?neculaifantanaru\.com\/([^"'#?\/]+\.html?)["']/i.exec(enFlags ? enFlags[1] : '');
+            if (!back || back[1].toLowerCase() !== roName) return;
             const h = enHtml.search(/<h1\b[^>]*class\s*=\s*["'][^"']*\bden_articol\b/i);
             if (h === -1) return;
             const enCur = dateDupParseArticleDate(enHtml);
@@ -6036,7 +6052,7 @@ if (isset($_GET['action'])) {
             const todayKey = res.today ? dateDupKeyFromTs(res.today) : dateDupDateToKey(new Date());
             const items = (res.articles || []).map(a => ({
                 file: a.file, key: dateDupKeyFromTs(a.ts), date: a.date, cat: a.cat || '', catName: a.catName || '',
-                listed: a.listed !== false
+                listed: a.listed !== false, created: a.created || 0, mtime: a.mtime || 0
             }));
             const padDay = items.some(a => /\s0\d,/.test(a.date));
             return { dir, lang: dateDupLangOfDir(dir), todayKey, items, padDay };
@@ -6057,8 +6073,11 @@ if (isset($_GET['action'])) {
                 const groups = [];
                 byKey.forEach((files, key) => {
                     if (files.length < 2) return;
+                    // Articolul creat cel mai recent (de obicei copia nouă) e cel care primește data nouă;
+                    // apare primul în grup și marcat distinct
+                    files.sort((a, b) => (b.created - a.created) || (b.mtime - a.mtime) || a.file.localeCompare(b.file));
                     groups.push({
-                        key, files,
+                        key, files, target: files[0].file,
                         alts: dateDupAlternatives(key, used, data.todayKey).map(k => dateDupFormat(k, data.lang, data.padDay))
                     });
                 });
@@ -6076,7 +6095,8 @@ if (isset($_GET['action'])) {
         // Verificarea articolului deschis (data din editor, chiar nesalvată)
         // onlyPath: verifică doar dacă acel fișier e încă cel deschis (s-ar putea să fi schimbat tab-ul)
         // silent: fără mesaj când data e unică (verificarea de la deschiderea fișierului)
-        async function runCurrentDateDuplicateCheck(onlyPath, silent) {
+        // force: verifică și un articol încă neadăugat în nicio categorie (folosit după Save)
+        async function runCurrentDateDuplicateCheck(onlyPath, silent, force) {
             if (!editor || !currentFile) return;
             if (onlyPath && dateDupNormPath(onlyPath) !== dateDupNormPath(currentFile)) return;
             const dir = dateDupDirOfFile(currentFile);
@@ -6086,6 +6106,10 @@ if (isset($_GET['action'])) {
             let data;
             try { data = await dateDupFetchDir(dir); } catch (e) { return; }
             const me = dateDupNormPath(currentFile);
+            // Articol nou (încă în nicio categorie, de obicei copiat dintr-unul vechi): la deschidere
+            // nu verificăm — data o schimbi oricum la final; verificarea vine după ce schimbi data.
+            const meListed = data.items.some(a => a.listed && dateDupNormPath(a.file) === me);
+            if (silent && !meListed && !force) return;
             // celelalte articole (doar cele din categorii); fișierul deschis e verificat oricum
             const others = data.items.filter(a => a.listed && dateDupNormPath(a.file) !== me);
             const same = others.filter(a => a.key === cur.key);
@@ -6100,7 +6124,7 @@ if (isset($_GET['action'])) {
             showDateDuplicatesDialog([{
                 lang: data.lang, dir,
                 groups: [{
-                    key: cur.key, files: [meEntry].concat(same),
+                    key: cur.key, files: [meEntry].concat(same), target: currentFile,
                     alts: dateDupAlternatives(cur.key, used, data.todayKey).map(k => dateDupFormat(k, data.lang, cur.padDay || data.padDay))
                 }]
             }], currentFile);
@@ -6195,6 +6219,52 @@ if (isset($_GET['action'])) {
             runFullDateDuplicateCheck(true);
         }
 
+        // Butonul „Aplică”: înlocuiește data de sub <h1 class="den_articol"> în articolul deschis
+        // (în cod; Design-ul se actualizează singur). Întoarce true dacă a schimbat-o.
+        function applyDateToOpenArticle(path, newDate) {
+            if (!editor || !currentFile || dateDupNormPath(path) !== dateDupNormPath(currentFile)) {
+                toast('Deschide întâi articolul ' + String(path).split('/').pop() + '.');
+                return false;
+            }
+            const v = editor.getValue();
+            const h = v.search(/<h1\b[^>]*class\s*=\s*["'][^"']*\bden_articol\b/i);
+            if (h === -1) { toast('Nu găsesc titlul articolului (h1 den_articol).'); return false; }
+            const td = /class\s*=\s*["'][^"']*\btext_dreapta\b[^"']*["'][^>]*>([\s\S]*?)<\/td>/i.exec(v.slice(h));
+            const d = td ? /\bOn\s+[^\s\d,<]+\s+\d{1,2},?\s+\d{4}/i.exec(td[1]) : null;
+            if (!d) { toast('Nu găsesc data articolului.'); return false; }
+            const from = h + td.index + td[0].indexOf(td[1]) + d.index;
+            editor.operation(() => {
+                editor.replaceRange(newDate, editor.posFromIndex(from), editor.posFromIndex(from + d[0].length), '+applyDate');
+            });
+            return true;
+        }
+
+        // „Aplică” din lista mare: schimbă data direct în fișier (doar textul datei, cu backup pe server),
+        // apoi în blocul lui din categorie și din index, iar pentru ro și în traducerea en.
+        async function applyDateToFileOnDisk(path, oldDate, catLink, newDate) {
+            const name = String(path).replace(/\\/g, '/').split('/').pop();
+            const dir = String(path).replace(/\\/g, '/').replace(/\/[^\/]*$/, '');
+            const open = findTabByPath(path);
+            if (open && open.isDirty) {
+                toast(name + ' e deschis și are modificări nesalvate. Salvează-l sau închide-l întâi.');
+                return false;
+            }
+            if (!await dateSyncReplace(path, 'article', '', newDate, '')) {
+                toast('Nu am putut schimba data în ' + name + '.');
+                return false;
+            }
+            const done = [name];
+            const cat = String(catLink || '').split('#')[0].split('?')[0].split('/').pop();
+            if (cat && await dateSyncReplace(dir + '/' + cat, 'list', name, newDate, oldDate)) done.push(cat);
+            if (await dateSyncReplace(dir + '/index.html', 'list', name, newDate, oldDate)) done.push('index.html');
+            if (/\/ro$/i.test(dir)) {
+                const html = await dateSyncLoad(path);
+                if (html !== null) { try { await syncDateToEnglishCounterpart(path, html); } catch (e) { console.error(e); } }
+            }
+            toast('Data ' + newDate.replace(/^On\s+/i, '') + ' a fost scrisă în: ' + done.join(', ') + '.');
+            return true;
+        }
+
         // Toate dublurile ca text simplu (butonul Copy), ex. pentru un .txt
         function dateDuplicatesAsText(sections) {
             const lines = [];
@@ -6205,7 +6275,8 @@ if (isset($_GET['action'])) {
                     lines.push(g.title || (String(g.files[0].date || '').replace(/^On\s+/i, '') + ' — ' + g.files.length + ' articole'));
                     g.files.forEach(f => {
                         const extra = f.info !== undefined ? f.info : (f.catName ? 'categoria: ' + f.catName : '');
-                        lines.push('   ' + f.file.replace(/\\/g, '/') + (extra ? '   (' + extra + ')' : ''));
+                        const mark = g.target && dateDupNormPath(g.target) === dateDupNormPath(f.file) ? '   <- aici se schimba data' : '';
+                        lines.push('   ' + f.file.replace(/\\/g, '/') + (extra ? '   (' + extra + ')' : '') + mark);
                     });
                     if (g.alts.length) lines.push('   Date libere apropiate: ' + g.alts.join('  |  '));
                     lines.push('');
@@ -6360,21 +6431,60 @@ if (isset($_GET['action'])) {
                         info.textContent = f.info !== undefined ? f.info
                             : (f.current ? '(articolul deschis acum) ' : '') + (f.catName ? 'categoria: ' + f.catName : '');
                         row.appendChild(info);
+                        // Articolul la care se schimbă data (cel mai nou / cel deschis): marcat distinct
+                        if (g.target && dateDupNormPath(g.target) === dateDupNormPath(f.file)) {
+                            row.style.cssText += ';background:rgba(250,204,21,.12);border:1px dashed #facc15;border-radius:6px;padding:3px 8px;margin:2px -8px';
+                            const badge = document.createElement('span');
+                            badge.textContent = '✎ aici se schimbă data';
+                            badge.title = currentPath ? 'Articolul deschis acum' : 'Fișierul creat cel mai recent din acest grup';
+                            badge.style.cssText = 'margin-left:auto;background:#facc15;color:#111;border-radius:10px;padding:0 8px;font-size:12px;font-weight:700;white-space:nowrap';
+                            row.appendChild(badge);
+                        }
                         card.appendChild(row);
                     });
                     if (g.alts.length) {
                         const alt = document.createElement('div');
                         alt.style.cssText = 'margin-top:4px;font-size:14px';
-                        alt.innerHTML = '<span style="color:#9ca3af">Date libere apropiate: </span>';
+                        const targetName = g.target ? g.target.replace(/\\/g, '/').split('/').pop() : '';
+                        alt.innerHTML = '<span style="color:#9ca3af"></span>';
+                        alt.firstChild.textContent = targetName ? 'Date libere pentru ' + targetName + ': ' : 'Date libere apropiate: ';
                         g.alts.forEach((a, i) => {
-                            const chip = document.createElement('span');
+                            // Data propusă e chiar butonul: click = data se scrie în articolul marcat
+                            const chip = document.createElement('button');
+                            chip.type = 'button';
                             chip.textContent = a;
-                            chip.title = 'Click = copiază data';
-                            chip.style.cssText = 'display:inline-block;margin:2px 6px 2px 0;padding:1px 8px;border-radius:10px;' +
-                                'background:#065f46;color:#d1fae5;cursor:pointer;font-weight:600';
-                            chip.onclick = () => {
-                                try { navigator.clipboard.writeText(a); toast('Copiat: ' + a); } catch (e) { }
-                            };
+                            chip.style.cssText = 'display:inline-block;margin:2px 8px 2px 0;padding:2px 10px;border-radius:10px;border:1px solid #10b981;' +
+                                'background:#065f46;color:#d1fae5;cursor:pointer;font-weight:600;font-size:14px';
+                            chip.onmouseenter = () => { chip.style.background = '#047857'; };
+                            chip.onmouseleave = () => { chip.style.background = '#065f46'; };
+                            if (currentPath) {
+                                // Fereastra articolului deschis: data se scrie în articol (în editor)
+                                chip.title = 'Click = pune data ' + a + ' în articolul deschis';
+                                chip.onclick = () => {
+                                    if (applyDateToOpenArticle(currentPath, a)) {
+                                        box.remove();
+                                        toast('Data a fost schimbată în ' + a.replace(/^On\s+/i, '') + '. Salvează (Ctrl+S) ca să intre și în categorie' +
+                                            (/\/ro\//i.test(String(currentPath).replace(/\\/g, '/')) ? ', index și en.' : ' și index.'));
+                                    }
+                                };
+                            } else if (g.target && !opts.id) {
+                                // Lista mare: data se scrie direct în fișierul marcat (articol, categorie,
+                                // index și traducerea en), fără să-l deschizi
+                                chip.title = 'Click = pune data ' + a + ' în ' + targetName;
+                                chip.onclick = async () => {
+                                    const tf = g.files.find(x => dateDupNormPath(x.file) === dateDupNormPath(g.target));
+                                    chip.disabled = true;
+                                    chip.style.opacity = '.6';
+                                    const ok = await applyDateToFileOnDisk(g.target, tf ? tf.date : '', tf ? tf.cat : '', a);
+                                    if (ok) runFullDateDuplicateCheck(true);
+                                    else { chip.disabled = false; chip.style.opacity = ''; }
+                                };
+                            } else {
+                                chip.title = 'Click = copiază data';
+                                chip.onclick = () => {
+                                    try { navigator.clipboard.writeText(a); toast('Copiat: ' + a); } catch (e) { }
+                                };
+                            }
                             alt.appendChild(chip);
                         });
                         card.appendChild(alt);
@@ -6386,7 +6496,7 @@ if (isset($_GET['action'])) {
             document.body.appendChild(box);
 
             // Textele în care caută Find-ul ferestrei (titlu grup, fișiere, categorii, date libere)
-            const searchable = Array.from(body.querySelectorAll('.dd-card > div:first-child, .dd-card a, .dd-card span'))
+            const searchable = Array.from(body.querySelectorAll('.dd-card > div:first-child, .dd-card a, .dd-card span, .dd-card button'))
                 .filter(el => !el.children.length);
             searchable.forEach(el => { el.dataset.ddText = el.textContent; });
             function applyFind() {
@@ -8481,6 +8591,9 @@ if (isset($_GET['action'])) {
                             // Articol din ro/ → aceeași dată și în traducerea din en/ (articol + categorie + index)
                             if (!isHtmlCategoryListingPage(tab.originalContent)) {
                                 try { await syncDateToEnglishCounterpart(currentFile, tab.originalContent); } catch (e) { console.error(e); }
+                                // După Save: dacă data articolului e deja a altui articol → fereastra cu
+                                // propuneri, imediat (și pentru un articol nou, copiat din altul)
+                                try { runCurrentDateDuplicateCheck(currentFile, true, true); } catch (e) { console.error(e); }
                             }
                         }
                         tab.categorySyncDescriptionBaseline = getCategorySyncDescriptionFromArticleHtml(tab.originalContent);
@@ -10661,6 +10774,11 @@ if (isset($_GET['action'])) {
             if (ov) {
                 ov.style.display = 'flex';
                 renderRecentFiles();
+            }
+            // Înapoi la meniu fără niciun fișier deschis → lista cu toate datele duplicate
+            // (runFullDateDuplicateCheck nu arată nimic dacă e încă vreun HTML deschis)
+            if (typeof runFullDateDuplicateCheck === 'function') {
+                setTimeout(() => { runFullDateDuplicateCheck(false).catch(() => { }); }, 400);
             }
         }
 
