@@ -962,6 +962,88 @@ if (isset($_GET['action'])) {
         exit;
     }
 
+    // Butonul „Translate”: ruleaza „TRADUCE TOT - automat.py”, care gaseste articolele din ro/ netraduse in en/,
+    // le traduce si le duce prin Pasul 0-5 pana in c:\Folder1\fisiere_html.
+    //   translateSiteCheck  (GET)  -> lista articolelor netraduse (nu modifica nimic)
+    //   translateSiteStart  (POST) -> porneste scriptul in fundal; scrie in jurnalul de mai jos
+    //   translateSiteStatus (GET)  -> continutul jurnalului + daca s-a terminat
+    if (in_array($action, ['translateSiteCheck', 'translateSiteStart', 'translateSiteStatus'], true)) {
+        $ttDir = 'e:/Carte/BB/17 - Site Leadership/alte/Ionel Balauta/Aryeht/Task 1 - Traduce tot site-ul/Doar Google Web/Andreea/Meditatii/2023/Iulia Python';
+        $ttScript = $ttDir . '/TRADUCE TOT - automat.py';
+        $ttBat = $ttDir . '/TRADUCE TOT - din editor.bat';
+        $ttLog = str_replace('\\', '/', sys_get_temp_dir()) . '/traduce_tot_editor.log';
+        $python = 'C:/Users/necul/AppData/Local/Programs/Python/Python312/python.exe';
+        if (!is_file($python)) $python = 'python';
+        $readLog = function () use ($ttLog) {
+            clearstatcache(true, $ttLog);
+            $t = @file_get_contents($ttLog);
+            return $t === false ? '' : $t;
+        };
+        // ruleaza daca jurnalul nu are marcajul de final si s-a scris in ultimele 20 de minute
+        $isRunning = function () use ($ttLog, $readLog) {
+            if (!is_file($ttLog)) return false;
+            if (strpos($readLog(), '[[SFARSIT') !== false) return false;
+            return (time() - (int) @filemtime($ttLog)) < 1200;
+        };
+        if (!is_file($ttScript) || !is_file($ttBat)) {
+            echo json_encode(['ok' => false, 'error' => 'Nu gasesc scriptul: ' . (is_file($ttScript) ? $ttBat : $ttScript)], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        if ($action === 'translateSiteCheck') {
+            @set_time_limit(120);
+            $env = getenv(); if (!is_array($env)) $env = [];
+            $env['PYTHONIOENCODING'] = 'utf-8'; $env['PYTHONUTF8'] = '1';
+            $proc = proc_open([$python, '-u', 'TRADUCE TOT - automat.py', '--doar-lista'],
+                [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+                $pipes, $ttDir, $env, ['bypass_shell' => true]);
+            if (!is_resource($proc)) {
+                echo json_encode(['ok' => false, 'error' => 'Nu am putut porni Python (' . $python . ').'], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            fclose($pipes[0]);
+            $out = stream_get_contents($pipes[1]); $err = stream_get_contents($pipes[2]);
+            fclose($pipes[1]); fclose($pipes[2]); proc_close($proc);
+            $j = json_decode(trim(substr($out, (int) strpos($out, '{'))), true);
+            if (!is_array($j) || !isset($j['netraduse'])) {
+                echo json_encode(['ok' => false, 'error' => "Scriptul nu a raspuns cum trebuie.\n" . $out . $err], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            echo json_encode(['ok' => true, 'files' => $j['netraduse'], 'running' => $isRunning()], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        if ($action === 'translateSiteStart' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+            if ($isRunning()) {
+                echo json_encode(['ok' => false, 'error' => 'Traducerea ruleaza deja.', 'running' => true], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            @file_put_contents($ttLog, "Pornesc scriptul...\n");
+            $win = function ($p) { return str_replace('/', '\\', $p); };
+            // „start” desprinde procesul de Apache: scriptul merge mai departe si daca se inchide pagina
+            $cmd = 'start "Traduce tot - automat" /MIN cmd /c ""' . $win($ttBat) . '" "' . $win($ttLog) . '""';
+            $h = @popen($cmd, 'r');
+            if ($h === false) {
+                echo json_encode(['ok' => false, 'error' => 'Nu am putut porni scriptul.'], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            pclose($h);
+            echo json_encode(['ok' => true, 'log' => $ttLog], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        if ($action === 'translateSiteStatus') {
+            $t = $readLog();
+            $done = preg_match('/\[\[SFARSIT cod=(-?\d+)\]\]/', $t, $m) === 1;
+            echo json_encode(['ok' => true, 'log' => $t, 'done' => $done,
+                'success' => $done && $m[1] === '0' && strpos($t, 'GATA in') !== false,
+                'running' => $isRunning()], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        echo json_encode(['ok' => false, 'error' => 'Cerere invalida.'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
     // Cele mai noi N articole dintr-un folder (ro/ sau en/), dupa data „On Luna zi, an” de sub <h1 class="den_articol">.
     // Paginile de categorii/index nu au <h1 den_articol>, deci sunt ignorate.
     // Cache in folderul temp: un fisier e recitit doar daca i s-a schimbat data modificarii.
@@ -1058,16 +1140,26 @@ if (isset($_GET['action'])) {
             exit;
         }
         $results = [];
+        // Întâi site-ul: Principal/ro și Principal/en (fișierele „bune”). Copiile identice din
+        // backup-uri sau alte foldere vin după ele, ca să nu fie alese în locul originalului.
+        foreach (['e:/Carte/BB/17 - Site Leadership/Principal/ro', 'e:/Carte/BB/17 - Site Leadership/Principal/en'] as $siteDir) {
+            if (is_file($siteDir . '/' . $name)) $results[] = $siteDir . '/' . $name;
+        }
         // Fast method: Windows dir /s /b
         $searchRoot = str_replace('/', '\\', rtrim($ROOT, '/'));
         $cmd = 'dir /s /b "' . $searchRoot . '\\' . $name . '" 2>nul';
         $output = [];
         @exec($cmd, $output);
+        $seen = [];
+        foreach ($results as $r) $seen[strtolower($r)] = true;
         foreach ($output as $line) {
             $line = trim($line);
-            if ($line)
-                $results[] = str_replace("\\", "/", $line);
-            if (count($results) >= 5)
+            if (!$line) continue;
+            $norm = str_replace("\\", "/", $line);
+            if (isset($seen[strtolower($norm)])) continue;
+            $seen[strtolower($norm)] = true;
+            $results[] = $norm;
+            if (count($results) >= 20)
                 break;
         }
         // Fallback: PHP scandir recursiv (daca exec nu a mers)
@@ -2414,6 +2506,34 @@ if (isset($_GET['action'])) {
             display: block;
             margin-top: 1px
         }
+
+        /* × din dreapta: apare doar la hover, scoate fișierul din lista de recente */
+        .recent-item .recent-remove {
+            flex-shrink: 0;
+            width: 24px;
+            height: 24px;
+            border: 0;
+            border-radius: 50%;
+            background: transparent;
+            color: #9ca3af;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity .15s, background .15s, color .15s
+        }
+
+        .recent-item:hover .recent-remove,
+        .recent-item .recent-remove:focus-visible {
+            opacity: 1
+        }
+
+        .recent-item .recent-remove:hover {
+            background: #ef4444;
+            color: #fff
+        }
     </style>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 </head>
@@ -2504,6 +2624,9 @@ if (isset($_GET['action'])) {
                 <button class="btn" id="btnSendArticleEmail" onclick="sendLatestArticleEmail()"
                     title="Trimite pe email ultimul articol din ro/index.html (ruleaza monitor_index.py in fundal)"
                     style="background:#16a34a;color:#fff;border-color:#15803d"><i class="fas fa-envelope"></i> Trimite E-mail</button>
+                <button class="btn" id="btnTranslateSite" onclick="translateUntranslatedArticles()"
+                    title="Gaseste articolele din ro/ netraduse in en/, le traduce si le duce in c:\Folder1\fisiere_html (TRADUCE TOT - automat.py)"
+                    style="background:#0891b2;color:#fff;border-color:#0e7490"><i class="fas fa-language"></i> Translate</button>
                 <button class="btn" id="btnDateDuble" onclick="openDateDuplicatesFromStart()"
                     title="Arată articolele din ro/ și en/ care au aceeași dată"
                     style="background:#dc2626;color:#fff;border-color:#b91c1c"><i class="fas fa-calendar-times"></i> Date-Duble</button>
@@ -3792,6 +3915,16 @@ if (isset($_GET['action'])) {
             }
         }
 
+        // Scoate un fișier din „Fișiere recente” (doar din listă, fișierul rămâne pe disc)
+        function removeFromRecentFiles(path) {
+            try {
+                const recent = (JSON.parse(localStorage.getItem('htmlEditorRecentFiles')) || []).filter(p => p !== path);
+                localStorage.setItem('htmlEditorRecentFiles', JSON.stringify(recent));
+            } catch (e) { console.error('Error removing recent file:', e); }
+            renderRecentFiles();
+            renderSidebarRecent();
+        }
+
         function renderRecentFiles() {
             const listEl = document.getElementById('recentFilesList');
             const sectionEl = document.getElementById('recentFilesSection');
@@ -3835,6 +3968,18 @@ if (isset($_GET['action'])) {
                         if (pathInp) pathInp.value = path;
                         openFromPath();
                     };
+
+                    const remove = document.createElement('button');
+                    remove.type = 'button';
+                    remove.className = 'recent-remove';
+                    remove.title = 'Scoate din lista de fișiere recente';
+                    remove.setAttribute('aria-label', 'Scoate ' + name + ' din lista de fișiere recente');
+                    remove.innerHTML = '<i class="fas fa-xmark"></i>';
+                    remove.onclick = (e) => {
+                        e.stopPropagation(); // nu deschide fișierul
+                        removeFromRecentFiles(path);
+                    };
+                    el.appendChild(remove);
 
                     listEl.appendChild(el);
                 });
@@ -6667,10 +6812,13 @@ if (isset($_GET['action'])) {
         window.addEventListener('load', scheduleIndexOrderCheck);
 
         function articleIdentityIssues(source, path) {
-            const file = String(path || '').replace(/\\/g, '/').split('/').pop();
-            if (!/\.html?$/i.test(file || '')) return [];
+            // Doar fișierele aflate direct în Principal/ro sau Principal/en (fără subfoldere, fără
+            // copii de backup din alte foldere): acolo canonicalul trebuie să fie chiar fișierul.
+            const site = /\/Principal\/(ro|en)\/([^\/]+\.html?)$/i.exec(String(path || '').replace(/\\/g, '/'));
+            if (!site) return [];
+            const file = site[2];
             const doc = new DOMParser().parseFromString(source, 'text/html');
-            const language = /\/en\//i.test(String(path).replace(/\\/g, '/')) ? 'en' : 'ro';
+            const language = site[1].toLowerCase();
             const expected = 'https://neculaifantanaru.com/' + (language === 'en' ? 'en/' : '') + file;
             const issues = [];
             const inspect = (label, value) => {
@@ -6720,7 +6868,7 @@ if (isset($_GET['action'])) {
                             }
                         } catch (_) { /* The filename mismatch remains useful even when the other file cannot be read. */ }
                     }
-                    details.push(issue.label + ': ' + issue.value + '.' + duplicate + ' Link așteptat: ' + issue.expected);
+                    details.push({ label: issue.label, value: issue.value, expected: issue.expected, duplicate: duplicate.trim() });
                 }
                 const current = tab.id === activeTabId && editor ? editor.getValue() : tab.editorContent;
                 if (!tabs.includes(tab)) return true;
@@ -6731,20 +6879,81 @@ if (isset($_GET['action'])) {
                     return false;
                 }
                 return new Promise(resolve => {
-                    const dialog = document.createElement('dialog');
-                    dialog.style.cssText = 'max-width:680px;width:calc(100% - 48px);padding:28px;border:1px solid #526080;border-radius:16px;background:#242735;color:#f1f3f9;font:16px/1.6 system-ui;overflow-wrap:anywhere';
-                    const heading = document.createElement('h2');
-                    heading.textContent = 'Verifică linkul canonical';
-                    dialog.appendChild(heading);
-                    const intro = document.createElement('p');
-                    intro.textContent = tab.filePath + ' conține linkuri care indică alt articol. Este posibil să fi rămas din fișierul copiat.';
-                    dialog.appendChild(intro);
-                    for (const text of details) { const p = document.createElement('p'); p.textContent = text; dialog.appendChild(p); }
+                    if (!document.getElementById('canonicalCheckStyle')) {
+                        const st = document.createElement('style');
+                        st.id = 'canonicalCheckStyle';
+                        st.textContent =
+                            '#canonicalCheck{margin:auto;inset:0;max-height:calc(100vh - 48px);overflow-y:auto;max-width:720px;width:calc(100% - 48px);box-sizing:border-box;padding:0;border:1px solid #46516d;border-radius:16px;background:#1f2330;color:#f1f3f9;box-shadow:0 24px 80px #000a;font:15px/1.55 system-ui;overflow:hidden}' +
+                            '#canonicalCheck::backdrop{background:#0c0f17b8}' +
+                            '#canonicalCheck .cc-head{display:flex;gap:14px;align-items:center;padding:20px 26px;background:linear-gradient(90deg,#3b2a12,#2a2414);border-bottom:1px solid #6b4f1d}' +
+                            '#canonicalCheck .cc-icon{flex:none;width:40px;height:40px;border-radius:50%;background:#f59e0b;color:#1f2330;display:flex;align-items:center;justify-content:center;font:700 22px system-ui}' +
+                            '#canonicalCheck h2{margin:0;font-size:21px}' +
+                            '#canonicalCheck .cc-sub{margin:2px 0 0;color:#fcd9a0;font-size:14px}' +
+                            '#canonicalCheck .cc-body{padding:20px 26px 8px}' +
+                            '#canonicalCheck .cc-file{margin:0 0 18px;color:#9aa3b8;font-size:13px;overflow-wrap:anywhere}' +
+                            '#canonicalCheck .cc-file b{display:block;color:#f1f3f9;font-size:17px;margin-bottom:2px}' +
+                            '#canonicalCheck .cc-row{border-radius:10px;padding:10px 14px;overflow-wrap:anywhere}' +
+                            '#canonicalCheck .cc-row small{display:block;font:700 12px system-ui;letter-spacing:.06em;text-transform:uppercase;margin-bottom:3px}' +
+                            '#canonicalCheck .cc-row code{font:14px/1.45 ui-monospace,Consolas,monospace}' +
+                            '#canonicalCheck .cc-bad{background:#3a1d22;border:1px solid #b4414f}' +
+                            '#canonicalCheck .cc-bad small,#canonicalCheck .cc-bad code{color:#ff9aa5}' +
+                            '#canonicalCheck .cc-good{background:#16332a;border:1px solid #2f9e74}' +
+                            '#canonicalCheck .cc-good small,#canonicalCheck .cc-good code{color:#7ee2b8}' +
+                            '#canonicalCheck .cc-gap{height:14px}' +
+                            '#canonicalCheck .cc-dup{margin:12px 0 0;padding:8px 12px;border-radius:8px;background:#3a3214;border:1px solid #a58a2b;color:#fde68a;font-size:14px;overflow-wrap:anywhere}' +
+                            '#canonicalCheck .cc-issue+.cc-issue{margin-top:22px;padding-top:18px;border-top:1px dashed #46516d}' +
+                            '#canonicalCheck .cc-foot{display:flex;justify-content:flex-end;gap:12px;padding:16px 26px 22px}' +
+                            '#canonicalCheck button{padding:10px 20px;border-radius:8px;font:600 15px system-ui;cursor:pointer}' +
+                            '#canonicalCheck .cc-stay{border:0;background:#397ce8;color:#fff}' +
+                            '#canonicalCheck .cc-stay:hover{background:#4b8bf0}' +
+                            '#canonicalCheck .cc-leave{border:1px solid #5a6480;background:transparent;color:#d6dbe8}' +
+                            '#canonicalCheck .cc-leave:hover{background:#2c3244}' +
+                            '#canonicalCheck button:focus-visible{outline:3px solid #b8d2ff;outline-offset:2px}';
+                        document.head.appendChild(st);
+                    }
+                    const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+                    const dialog = el('dialog');
+                    dialog.id = 'canonicalCheck';
+                    const head = el('div', 'cc-head');
+                    head.appendChild(el('div', 'cc-icon', '!'));
+                    const titles = el('div');
+                    titles.appendChild(el('h2', null, 'Verifică linkul canonical'));
+                    titles.appendChild(el('p', 'cc-sub', 'Linkul indică alt articol — probabil a rămas din fișierul copiat.'));
+                    head.appendChild(titles);
+                    dialog.appendChild(head);
+                    const body = el('div', 'cc-body');
+                    const fileBox = el('p', 'cc-file');
+                    const path = String(tab.filePath).replace(/\\/g, '/');
+                    fileBox.appendChild(el('b', null, path.split('/').pop()));
+                    fileBox.appendChild(document.createTextNode(path));
+                    body.appendChild(fileBox);
+                    for (const d of details) {
+                        const issue = el('div', 'cc-issue');
+                        const bad = el('div', 'cc-row cc-bad');
+                        bad.appendChild(el('small', null, '✗ ' + d.label + ' din fișier (greșit)'));
+                        bad.appendChild(el('code', null, d.value));
+                        issue.appendChild(bad);
+                        issue.appendChild(el('div', 'cc-gap'));
+                        const good = el('div', 'cc-row cc-good');
+                        good.appendChild(el('small', null, '✓ Link corect pentru acest fișier'));
+                        good.appendChild(el('code', null, d.expected));
+                        issue.appendChild(good);
+                        if (d.duplicate) issue.appendChild(el('p', 'cc-dup', '⚠ ' + d.duplicate));
+                        body.appendChild(issue);
+                    }
+                    dialog.appendChild(body);
+                    const foot = el('div', 'cc-foot');
                     const finish = value => { dialog.close(); dialog.remove(); resolve(value); };
-                    const stay = document.createElement('button'); stay.textContent = 'Revin la editare'; stay.autofocus = true;
-                    stay.onclick = () => finish(false); dialog.appendChild(stay);
-                    if (closing) { const leave = document.createElement('button'); leave.textContent = 'Închid oricum'; leave.onclick = () => finish(true); dialog.appendChild(leave); }
-                    for (const button of dialog.querySelectorAll('button')) button.style.cssText = 'padding:10px 18px;margin:8px 12px 0 0;border:0;border-radius:8px;background:#397ce8;color:white;font:inherit;cursor:pointer';
+                    if (closing) {
+                        const leave = el('button', 'cc-leave', 'Închid oricum');
+                        leave.onclick = () => finish(true);
+                        foot.appendChild(leave);
+                    }
+                    const stay = el('button', 'cc-stay', 'Revin la editare');
+                    stay.autofocus = true;
+                    stay.onclick = () => finish(false);
+                    foot.appendChild(stay);
+                    dialog.appendChild(foot);
                     dialog.addEventListener('cancel', event => { event.preventDefault(); finish(false); });
                     document.body.appendChild(dialog); dialog.showModal();
                 });
@@ -10003,6 +10212,13 @@ if (isset($_GET['action'])) {
                 // would place the caret in the surrounding text, not on the image).
                 e.preventDefault();
                 e.stopPropagation();
+                // Steag din secțiunea FLAGS: copiază doar numele paginii din link
+                // (ex. https://neculaifantanaru.com/en/the-master-of-the-world.html → the-master-of-the-world.html)
+                if (e.button === 0 && /flag_lang_/i.test(target.getAttribute('src') || '')) {
+                    const href = (anchor.getAttribute('href') || '').split('#')[0].split('?')[0];
+                    const page = href.replace(/\/+$/, '').split('/').pop();
+                    if (page) copyFlagPageName(page, (target.getAttribute('title') || target.getAttribute('alt') || '').trim());
+                }
                 // Manually select the <img> element
                 const iframeWin = document.getElementById('preview').contentWindow;
                 try {
@@ -10749,6 +10965,104 @@ if (isset($_GET['action'])) {
             } finally {
                 if (btn) { btn.disabled = false; btn.style.opacity = ''; }
             }
+        }
+
+        // ── Butonul „Translate”: gaseste articolele din ro/ netraduse → confirmare → TRADUCE TOT - automat.py in fundal
+        //    → fereastra cu jurnalul scriptului, actualizat in timp real, pana la final ──
+        function confirmTranslateDialog(files) {
+            return new Promise(function (resolve) {
+                const old = document.getElementById('translateConfirmDialog');
+                if (old) old.remove();
+                const esc = function (s) { return String(s || '').replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+                const dlg = document.createElement('div');
+                dlg.id = 'translateConfirmDialog';
+                dlg.style.cssText = 'position:fixed;inset:0;z-index:100003;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55);backdrop-filter:blur(2px)';
+                dlg.innerHTML =
+                    '<div style="width:min(560px,calc(100% - 32px));background:#1f2330;border:1px solid #3a4152;border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.6);font-family:Segoe UI,Arial,sans-serif;overflow:hidden">' +
+                    '<div style="display:flex;align-items:center;gap:12px;padding:18px 22px 6px">' +
+                    '<span style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:50%;background:rgba(8,145,178,.18);font-size:20px">🌐</span>' +
+                    '<b style="color:#f1f5f9;font-size:19px">Traduc ' + files.length + (files.length === 1 ? ' articol' : ' articole') + ' în engleză?</b></div>' +
+                    '<div style="padding:8px 22px 4px;color:#94a3b8;font-size:14px">Articole din <code style="color:#cbd5e1">ro/</code> netraduse în <code style="color:#cbd5e1">en/</code>:</div>' +
+                    '<div style="margin:10px 22px 4px;padding:12px 16px;max-height:240px;overflow:auto;background:#161a24;border:1px solid #2f3646;border-left:4px solid #0891b2;border-radius:8px;color:#e2e8f0;font:14px/1.7 Consolas,monospace">' +
+                    files.map(function (f) { return esc(f); }).join('<br>') + '</div>' +
+                    '<div style="padding:10px 22px 0;color:#94a3b8;font-size:13px">Backup, traducere, Pasul 0–5, apoi fișierele ajung în <code style="color:#cbd5e1">c:\\Folder1\\fisiere_html</code> (golit înainte de Pasul 5).</div>' +
+                    '<div style="display:flex;justify-content:flex-end;gap:10px;padding:18px 22px 20px">' +
+                    '<button type="button" class="tcf-cancel" style="padding:9px 20px;border-radius:8px;border:1px solid #475066;background:transparent;color:#e2e8f0;font-size:15px;cursor:pointer">Anulează</button>' +
+                    '<button type="button" class="tcf-ok" style="padding:9px 22px;border-radius:8px;border:0;background:#0891b2;color:#fff;font-size:15px;font-weight:600;cursor:pointer">Traduce</button>' +
+                    '</div></div>';
+                document.body.appendChild(dlg);
+                const done = function (val) {
+                    document.removeEventListener('keydown', onKey, true);
+                    dlg.remove();
+                    resolve(val);
+                };
+                const onKey = function (e) {
+                    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); }
+                    else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); done(true); }
+                };
+                document.addEventListener('keydown', onKey, true);
+                dlg.querySelector('.tcf-ok').onclick = function () { done(true); };
+                dlg.querySelector('.tcf-cancel').onclick = function () { done(false); };
+                dlg.addEventListener('click', function (e) { if (e.target === dlg) done(false); });
+                dlg.querySelector('.tcf-ok').focus();
+            });
+        }
+        let _translatePollTimer = null;
+        function pollTranslateLog() {
+            const btn = document.getElementById('btnTranslateSite');
+            if (_translatePollTimer) clearTimeout(_translatePollTimer);
+            const tick = async function () {
+                let r;
+                try { r = await (await fetch('?action=translateSiteStatus', { cache: 'no-store' })).json(); }
+                catch (e) { _translatePollTimer = setTimeout(tick, 3000); return; }
+                const text = String(r.log || '').replace(/\[\[SFARSIT cod=-?\d+\]\]\s*$/, '').replace(/\s+$/, '');
+                const dlg = document.getElementById('emailConsoleDialog');
+                const visible = dlg && dlg.style.display !== 'none' && /^Translate/.test(dlg.querySelector('.ec-title').textContent);
+                if (r.done) {
+                    _translatePollTimer = null;
+                    if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+                    showEmailConsole(r.success ? 'Translate — gata ✓ (fișierele sunt în c:\\Folder1\\fisiere_html)' : 'Translate — oprit ✗',
+                        text + '\n>>>', r.success ? '#38bdf8' : '#f87171');
+                } else {
+                    if (visible) {
+                        const body = dlg.querySelector('.ec-body');
+                        const atEnd = body.scrollTop + body.clientHeight >= body.scrollHeight - 30;
+                        dlg.querySelector('.ec-title').textContent = 'Translate — rulează…';
+                        body.textContent = text || 'Pornesc scriptul...';
+                        if (atEnd) body.scrollTop = body.scrollHeight;
+                    }
+                    _translatePollTimer = setTimeout(tick, 1500);
+                }
+            };
+            tick();
+        }
+        async function translateUntranslatedArticles() {
+            const btn = document.getElementById('btnTranslateSite');
+            if (_translatePollTimer) { showEmailConsole('Translate — rulează…', 'Se încarcă jurnalul...', '#facc15'); return; }
+            if (btn && btn.disabled) return;
+            if (btn) { btn.disabled = true; btn.style.opacity = '.6'; }
+            const enable = function () { if (btn) { btn.disabled = false; btn.style.opacity = ''; } };
+            showEmailConsole('Translate', 'Caut articolele din ro/ care nu sunt traduse în en/...', '#facc15');
+            let info;
+            try { info = await (await fetch('?action=translateSiteCheck', { cache: 'no-store' })).json(); }
+            catch (e) { enable(); showEmailConsole('Translate — eroare', 'Nu pot contacta serverul: ' + e.message, '#f87171'); return; }
+            if (!info.ok) { enable(); showEmailConsole('Translate — eroare', info.error || 'Eroare necunoscută.', '#f87171'); return; }
+            if (info.running) { showEmailConsole('Translate — rulează…', 'Traducerea rulează deja.', '#facc15'); pollTranslateLog(); return; }
+            if (!info.files || !info.files.length) {
+                enable();
+                showEmailConsole('Translate', 'Toate articolele din ro/ sunt deja traduse în en/.\nNu am nimic de făcut.', '#4ade80');
+                return;
+            }
+            const dlg0 = document.getElementById('emailConsoleDialog');
+            if (dlg0) dlg0.style.display = 'none';
+            if (!await confirmTranslateDialog(info.files)) { enable(); return; }
+            let r;
+            try {
+                r = await (await fetch('?action=translateSiteStart', { method: 'POST', body: new URLSearchParams({}) })).json();
+            } catch (e) { enable(); showEmailConsole('Translate — eroare', 'Eroare: ' + e.message, '#f87171'); return; }
+            if (!r.ok && !r.running) { enable(); showEmailConsole('Translate — eroare', r.error || 'Eroare necunoscută.', '#f87171'); return; }
+            showEmailConsole('Translate — rulează…', 'Pornesc scriptul...\n(poți închide fereastra; traducerea merge mai departe)', '#facc15');
+            pollTranslateLog();
         }
 
         // „Continua la editor” fara niciun fisier deschis: pregateste o pagina goala editabila
@@ -12513,6 +12827,64 @@ if (isset($_GET['action'])) {
             el.textContent = msg || '';
         }
 
+        // Click pe un steag în Design / Split: numele paginii (fără https://neculaifantanaru.com/…/)
+        // ajunge în clipboard
+        function copyFlagPageName(page, lang) {
+            const done = () => toast('Copiat' + (lang ? ' (' + lang + ')' : '') + ': ' + page);
+            const fallback = () => {
+                const ta = document.createElement('textarea');
+                ta.value = page;
+                ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+                document.body.appendChild(ta);
+                ta.select();
+                let ok = false;
+                try { ok = document.execCommand('copy'); } catch (e) { }
+                ta.remove();
+                ok ? done() : toast('Nu am putut copia ' + page);
+            };
+            try {
+                navigator.clipboard.writeText(page).then(done, fallback);
+            } catch (e) { fallback(); }
+        }
+
+        // Fișier tras în editor care există identic în mai multe foldere: utilizatorul alege
+        // de unde l-a deschis (browserul nu dă calea fișierului, doar numele și conținutul).
+        function chooseDroppedFilePath(name, paths) {
+            return new Promise(resolve => {
+                const dlg = document.createElement('dialog');
+                dlg.style.cssText = 'margin:auto;inset:0;max-width:760px;width:calc(100% - 48px);padding:22px 26px;border:1px solid #46516d;' +
+                    'border-radius:14px;background:#1f2330;color:#f1f3f9;font:15px/1.5 system-ui;box-shadow:0 24px 80px #000a';
+                const h = document.createElement('h3');
+                h.style.cssText = 'margin:0 0 6px;font-size:19px';
+                h.textContent = 'Din ce folder ai deschis ' + name + '?';
+                dlg.appendChild(h);
+                const p = document.createElement('p');
+                p.style.cssText = 'margin:0 0 14px;color:#9aa3b8';
+                p.textContent = 'Același fișier, identic, există în mai multe locuri. Alege-l pe cel pe care vrei să-l editezi (acolo se va salva).';
+                dlg.appendChild(p);
+                const done = v => { dlg.close(); dlg.remove(); resolve(v); };
+                paths.forEach(path => {
+                    const b = document.createElement('button');
+                    const norm = String(path).replace(/\\/g, '/');
+                    const isSite = /\/Principal\/(ro|en)\/[^\/]+$/i.test(norm);
+                    b.textContent = norm;
+                    b.style.cssText = 'display:block;width:100%;text-align:left;margin:6px 0;padding:10px 12px;border-radius:8px;cursor:pointer;' +
+                        'font:13px/1.4 ui-monospace,Consolas,monospace;overflow-wrap:anywhere;' +
+                        (isSite ? 'background:#16332a;border:1px solid #2f9e74;color:#7ee2b8' : 'background:#262b3a;border:1px solid #46516d;color:#d6dbe8');
+                    b.onclick = () => done(path);
+                    dlg.appendChild(b);
+                });
+                const cancel = document.createElement('button');
+                cancel.textContent = 'Nu știu — lasă fără cale (Save as)';
+                cancel.style.cssText = 'margin-top:10px;padding:8px 16px;border-radius:8px;border:1px solid #5a6480;background:transparent;color:#d6dbe8;cursor:pointer;font:600 14px system-ui';
+                cancel.onclick = () => done(null);
+                dlg.appendChild(cancel);
+                dlg.addEventListener('cancel', e => { e.preventDefault(); done(null); });
+                document.body.appendChild(dlg);
+                dlg.showModal();
+            });
+        }
+
         function handleDropFile(file) {
             if (!file) { dropStatus('Niciun fisier primit', '#ef4444'); return; }
             if (!hasAllowedExt(file.name)) { dropStatus('Doar fisiere HTML, CSS, JS sau PHP', '#ef4444'); return; }
@@ -12615,17 +12987,23 @@ if (isset($_GET['action'])) {
                                         .catch(() => null)
                                 )
                             ).then(loaded => {
-                                let matched = null;
+                                // Toate copiile cu exact același conținut (originalul + eventuale backup-uri)
+                                const same = [];
                                 for (let i = 0; i < loaded.length; i++) {
                                     if (loaded[i] && loaded[i].ok &&
                                         (loaded[i].content || '').replace(/\r\n/g, '\n') === draggedContent) {
-                                        matched = data.results[i];
-                                        break;
+                                        same.push(data.results[i]);
                                     }
                                 }
-                                if (matched) {
-                                    resolveTabPath(matched);
+                                if (!same.length) return;
+                                // Prioritate: fișierul din Principal/ro sau Principal/en (fără subfoldere)
+                                const site = same.filter(p => /\/Principal\/(ro|en)\/[^\/]+$/i.test(String(p).replace(/\\/g, '/')));
+                                if (site.length === 1 || same.length === 1) {
+                                    resolveTabPath(site.length === 1 ? site[0] : same[0]);
+                                    return;
                                 }
+                                // Mai multe copii identice și niciuna sigură → întreabă, nu ghici
+                                chooseDroppedFilePath(file.name, site.length ? site : same).then(p => { if (p) resolveTabPath(p); });
                             });
                         }
                     })
