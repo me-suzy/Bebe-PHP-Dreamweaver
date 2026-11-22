@@ -98,7 +98,173 @@ function align_saved_html_charset_declaration_utf8($html)
     return ($out2 !== null && $cnt2 > 0) ? $out2 : $html;
 }
 
+function html_save_is_catastrophically_truncated($existing, $candidate, &$reason)
+{
+    $oldLen = strlen((string) $existing);
+    $newLen = strlen((string) $candidate);
+    $reason = '';
+    if ($oldLen < 12000 || $newLen >= (int) floor($oldLen * 0.55)) {
+        return false;
+    }
+
+    $oldP = preg_match_all('/<p\b/i', $existing);
+    $newP = preg_match_all('/<p\b/i', $candidate);
+    $oldDiv = preg_match_all('/<div\b/i', $existing);
+    $newDiv = preg_match_all('/<div\b/i', $candidate);
+    $oldTable = preg_match_all('/<table\b/i', $existing);
+    $newTable = preg_match_all('/<table\b/i', $candidate);
+
+    $lostParagraphs = $oldP >= 5 && $newP < max(1, (int) floor($oldP * 0.25));
+    $lostDivs = $oldDiv >= 8 && $newDiv < max(1, (int) floor($oldDiv * 0.25));
+    $lostTables = $oldTable >= 3 && $newTable < max(1, (int) floor($oldTable * 0.25));
+    if (!$lostParagraphs && !$lostDivs && !$lostTables) {
+        return false;
+    }
+
+    $reason = 'Fisierul ar scadea de la ' . $oldLen . ' la ' . $newLen
+        . ' bytes si ar pierde structura HTML principala.';
+    return true;
+}
+
+function create_pre_save_backup($full)
+{
+    if (!is_file($full)) {
+        return false;
+    }
+    $backupDir = dirname($full) . DIRECTORY_SEPARATOR . '.mini-dreamweaver-backups';
+    if (!is_dir($backupDir) && !@mkdir($backupDir, 0777, true)) {
+        return false;
+    }
+    $now = microtime(true);
+    $micro = sprintf('%06d', (int) (($now - floor($now)) * 1000000));
+    $backupName = basename($full) . '.before-save-' . date('Ymd-His') . '-' . $micro . '.bak';
+    $backupPath = $backupDir . DIRECTORY_SEPARATOR . $backupName;
+    if (!@copy($full, $backupPath)) {
+        return false;
+    }
+
+    $pattern = $backupDir . DIRECTORY_SEPARATOR . basename($full) . '.before-save-*.bak';
+    $copies = glob($pattern) ?: [];
+    usort($copies, function ($a, $b) {
+        return (@filemtime($b) ?: 0) <=> (@filemtime($a) ?: 0);
+    });
+    foreach (array_slice($copies, 25) as $oldCopy) {
+        @unlink($oldCopy);
+    }
+    return $backupPath;
+}
+
+/** Remove stray </span> tags that have no matching opening <span> inside a text paragraph. */
+function remove_orphan_closing_spans_from_paragraphs_php($html)
+{
+    return preg_replace_callback(
+        '/(<p\b[^>]*\bclass\s*=\s*["\'][^"\']*\btext_obisnuit2?\b[^"\']*["\'][^>]*>)([\s\S]*?)(<\/p>)/i',
+        function ($m) {
+            $depth = 0;
+            $inner = preg_replace_callback(
+                '/<\/?span\b[^>]*>/i',
+                function ($tag) use (&$depth) {
+                    if (preg_match('/^<\s*span\b/i', $tag[0])) {
+                        $depth++;
+                        return $tag[0];
+                    }
+                    if ($depth > 0) {
+                        $depth--;
+                        return $tag[0];
+                    }
+                    return '';
+                },
+                $m[2]
+            );
+            return $m[1] . $inner . $m[3];
+        },
+        (string) $html
+    );
+}
+
+function normalize_full_text_obisnuit2_span_paragraphs_php($html)
+{
+    $html = remove_orphan_closing_spans_from_paragraphs_php($html);
+    return preg_replace_callback(
+        '/(<p\b[^>]*\bclass\s*=\s*["\'][^"\']*\btext_obisnuit\b[^"\']*["\'][^>]*>)\s*<span\b[^>]*\bclass\s*=\s*["\'][^"\']*\btext_obisnuit2\b[^"\']*["\'][^>]*>([\s\S]*?)<\/span>\s*(<\/p>)/i',
+        function ($m) {
+            return $m[1] . $m[2] . $m[3];
+        },
+        (string) $html
+    );
+}
+
 /** Text simplu din interiorul unui tag (fără alte tag-uri). */
+function normalize_text_paragraph_inline_formatting_php($html)
+{
+    $html = preg_replace_callback(
+        '/(<p\b[^>]*\bclass\s*=\s*["\'][^"\']*\btext_obisnuit2?\b[^"\']*["\'][^>]*>)([\s\S]*?)(<\/p>)/i',
+        function ($m) {
+            $depths = [];
+            $inner = preg_replace('/<i\s*>/i', '<em>', $m[2]);
+            $inner = preg_replace('/<\/i>/i', '</em>', $inner);
+            $inner = preg_replace_callback(
+                '/<\/?(em|strong|u)\b[^>]*>/i',
+                function ($tag) use (&$depths) {
+                    $name = strtolower($tag[1]);
+                    if (!isset($depths[$name])) $depths[$name] = 0;
+                    if (preg_match('/^<\s*' . preg_quote($name, '/') . '\b/i', $tag[0])) {
+                        $depths[$name]++;
+                        return $tag[0];
+                    }
+                    if ($depths[$name] > 0) {
+                        $depths[$name]--;
+                        return $tag[0];
+                    }
+                    return '';
+                },
+                $inner
+            );
+            do {
+                $before = $inner;
+                $inner = preg_replace('/<(em|strong|u)\b[^>]*>\s*<\/\1>/i', '', $inner);
+                $inner = preg_replace('/<em>\s*<em>/i', '<em>', $inner);
+                $inner = preg_replace('/<\/em>\s*<\/em>/i', '</em>', $inner);
+            } while ($inner !== $before);
+            return $m[1] . $inner . $m[3];
+        },
+        (string) $html
+    );
+    return preg_replace(
+        '/^[\t ]*<p\b[^>]*\bclass\s*=\s*["\'][^"\']*\btext_obisnuit2?\b[^"\']*["\'][^>]*>\s*(?:<(?:em|i|strong|b|u)\b[^>]*>\s*<\/(?:em|i|strong|b|u)>\s*)+<\/p>\s*\r?\n?/mi',
+        '',
+        $html
+    );
+}
+
+/**
+ * In zona articolului, muta inchiderile de paragraf ramase singure pe randul urmator
+ * la sfarsitul textului: "text\n</p>" -> "text</p>" si
+ * "text\n</em></p>" -> "text</em></p>".
+ */
+function join_sasa_paragraph_closing_tags_php($html)
+{
+    return preg_replace_callback(
+        '/(<!--\s*SASA-1\s*-->)([\s\S]*?)(<!--\s*SASA-2\s*-->)/i',
+        function ($zone) {
+            $body = preg_replace_callback(
+                '/(<p\b[^>]*\bclass\s*=\s*["\'][^"\']*\btext_obisnuit2?\b[^"\']*["\'][^>]*>)([\s\S]*?)(<\/p>)/i',
+                function ($paragraph) {
+                    $inner = preg_replace(
+                        '/[\t ]*(?:\r?\n[\t ]*)+(?=(?:<\/(?:em|i|strong|b|u)>[\t ]*)*$)/i',
+                        '',
+                        $paragraph[2]
+                    );
+                    return $paragraph[1] . $inner . $paragraph[3];
+                },
+                $zone[2]
+            );
+            return $zone[1] . $body . $zone[3];
+        },
+        (string) $html
+    );
+}
+
 function plain_text_from_html_inner($inner)
 {
     $x = preg_replace('/<br\s*\/?>/i', ' ', (string) $inner);
@@ -214,7 +380,7 @@ function merge_body_with_protected_script_tail_php($origInner, $designInner)
         return rtrim($core) . "\n    " . rtrim($tail) . "\n";
     }
     if (preg_match_all('/<script\b[^>]*>[\s\S]*?<\/script>/i', $origInner, $scripts) && !empty($scripts[0])) {
-        $core = preg_replace('/(?:\s*<!--[\s\S]*?-->[\s]*)+$/', '', $designInner);
+        $core = preg_replace('/(?:\s*<!--(?:(?!-->)[\s\S])*-->[\s]*)+$/', '', $designInner);
         return rtrim($core) . "\n    " . implode("\n    ", $scripts[0]) . "\n";
     }
     return $designInner;
@@ -515,7 +681,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'preview') {
 
                 // DOMContentLoaded notification script (our only injected script)
                 $domReadyScript = '<script>document.addEventListener("DOMContentLoaded",function(){'
-                    . 'try{if(window.parent&&window.parent.__previewDOMReady)window.parent.__previewDOMReady();}catch(e){}'
+                    . 'try{if(window.parent&&window.parent.__previewDOMReady)window.parent.__previewDOMReady(window.location.href);}catch(e){}'
                     . '});</script>';
 
                 // Override CSS — force ALL elements to be visible.
@@ -740,6 +906,9 @@ if (isset($_GET['action'])) {
         $existingOnDisk = file_exists($full) ? read_file_as_utf8($full) : false;
         if (($extSave === 'html' || $extSave === 'htm') && $content !== '') {
             $beforeMeta = $content;
+            $content = remove_orphan_closing_spans_from_paragraphs_php($content);
+            $content = normalize_text_paragraph_inline_formatting_php($content);
+            $content = join_sasa_paragraph_closing_tags_php($content);
             $content = align_saved_html_charset_declaration_utf8($content);
             $content = apply_sasa_teaser_to_meta_description_php($content);
             $content = apply_h1_to_page_titles_php($content);
@@ -748,8 +917,32 @@ if (isset($_GET['action'])) {
             }
             $metaSynced = ($content !== $beforeMeta);
         }
-        file_put_contents($full, $content);
-        echo json_encode(['ok' => true, 'file' => $full, 'metaSynced' => $metaSynced]);
+        if ($existingOnDisk !== false && ($extSave === 'html' || $extSave === 'htm')) {
+            $truncateReason = '';
+            if (html_save_is_catastrophically_truncated($existingOnDisk, $content, $truncateReason)) {
+                echo json_encode([
+                    'ok' => false,
+                    'error' => 'Salvare blocata pentru protectia datelor. ' . $truncateReason
+                ], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+        }
+
+        $backupPath = ($existingOnDisk !== false) ? create_pre_save_backup($full) : false;
+        $written = @file_put_contents($full, $content, LOCK_EX);
+        if ($written === false || $written !== strlen($content)) {
+            if ($backupPath && is_file($backupPath)) {
+                @copy($backupPath, $full);
+            }
+            echo json_encode(['ok' => false, 'error' => 'Scriere incompleta; fisierul anterior a fost restaurat.']);
+            exit;
+        }
+        echo json_encode([
+            'ok' => true,
+            'file' => $full,
+            'metaSynced' => $metaSynced,
+            'backup' => $backupPath ? str_replace('\\', '/', $backupPath) : null
+        ]);
         exit;
     }
 
@@ -1980,7 +2173,7 @@ if (isset($_GET['action'])) {
         </div>
         <div id="tabBarSpacer" style="flex:1"></div>
         <button class="btn btn-ghost" onclick="closeActiveTab()">Inchide tab</button>
-        <button class="btn btn-primary" onclick="saveFile()">Salveaza (Ctrl+S)</button>
+        <button type="button" class="btn btn-primary" onmousedown="event.preventDefault()" onclick="saveFile()">Salveaza (Ctrl+S)</button>
     </div>
     <div class="main">
         <div class="sidebar">
@@ -2007,6 +2200,8 @@ if (isset($_GET['action'])) {
                         title="Aplică clasa text_obisnuit2 pe selecția din Design">B</button>
                     <button type="button" id="btnQuickItalic" class="btn btn-ghost"
                         title="Italic (&lt;em&gt;) pe selecția din Design (ca butonul I de jos)">I</button>
+                    <button type="button" id="btnQuickUnderline" class="btn btn-ghost"
+                        title="Underline (&lt;u&gt;) pe selectia din Design">U</button>
                 </div>
                 <div class="viewmode-tabs" style="margin-left:12px">
                     <button type="button" id="btnBrowserTab" onclick="toggleBrowserPanel()"
@@ -2102,6 +2297,7 @@ if (isset($_GET['action'])) {
                 </select>
                 <button type="button" class="btn btn-ghost prop-btn" id="propBold" title="Bold">B</button>
                 <button type="button" class="btn btn-ghost prop-btn" id="propItalic" title="Italic">I</button>
+                <button type="button" class="btn btn-ghost prop-btn" id="propUnderline" title="Underline">U</button>
                 <label>Text:</label><input type="color" id="propColor" value="#000000" title="Culoare text">
                 <label>Fundal:</label><input type="color" id="propBg" value="#ffffff" title="Culoare fundal">
             </div>
@@ -2132,6 +2328,7 @@ if (isset($_GET['action'])) {
         let skipPreviewUpdateUntil = 0;
         let sidebarVisible = true;
         let lastPreviewHadBody = false;
+        let lastDesignSelectionRange = null;
 
         // --- Custom undo/redo stack for the design panel ---
         // The browser's native contentEditable undo (execCommand('undo')) does NOT
@@ -2503,6 +2700,20 @@ if (isset($_GET['action'])) {
             if (activeEl) activeEl.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
         }
 
+        // Saving changes a tab's label/dirty state, not the tab list or its scroll position.
+        function updateTabPresentation(tab) {
+            const bar = document.getElementById('tabBar');
+            if (!bar || !tab) return;
+            const el = Array.from(bar.querySelectorAll('.editor-tab')).find(node =>
+                node.dataset.tabId === String(tab.id));
+            if (!el) return;
+            el.classList.toggle('dirty', !!tab.isDirty);
+            el.title = tab.fullTitle || tab.tabLabel;
+            const label = el.querySelector('.tab-label');
+            const text = (tab.type === 'browser' ? '🌐 ' : '') + tab.tabLabel;
+            if (label && label.textContent !== text) label.textContent = text;
+        }
+
         function saveCurrentTabState() {
             if (!activeTabId) return;
             var tab = null;
@@ -2782,6 +2993,59 @@ if (isset($_GET['action'])) {
 
         // ===== BACKUP SYSTEM =====
         var _backupTimer = null;
+        var _backupOwnerId = (function () {
+            try {
+                if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+                    return window.crypto.randomUUID();
+                }
+            } catch (e) { }
+            return 'window-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+        })();
+
+        function readBackupRecords() {
+            try {
+                var raw = localStorage.getItem('htmlEditorBackupTabs');
+                if (!raw) return [];
+                var arr = JSON.parse(raw);
+                return Array.isArray(arr) ? arr : [];
+            } catch (e) {
+                return [];
+            }
+        }
+
+        function writeBackupRecords(records) {
+            try {
+                if (records.length > 0) {
+                    localStorage.setItem('htmlEditorBackupTabs', JSON.stringify(records));
+                } else {
+                    localStorage.removeItem('htmlEditorBackupTabs');
+                }
+            } catch (e) { }
+        }
+
+        function makeTabBackup(tab) {
+            return {
+                ownerId: _backupOwnerId,
+                updatedAt: Date.now(),
+                id: tab.id,
+                filePath: tab.filePath,
+                fileName: tab.fileName,
+                tabLabel: tab.tabLabel,
+                fullTitle: tab.fullTitle,
+                editorContent: tab.editorContent,
+                originalContent: tab.originalContent,
+                cursorPos: tab.cursorPos,
+                scrollInfo: tab.scrollInfo,
+                viewMode: tab.viewMode
+            };
+        }
+
+        function replaceOwnedBackups(ownedBackups) {
+            var records = readBackupRecords().filter(function (b) {
+                return b.ownerId !== _backupOwnerId;
+            });
+            writeBackupRecords(records.concat(ownedBackups));
+        }
 
         function backupDirtyTabs() {
             // Debounce — save at most every 2 seconds
@@ -2792,70 +3056,73 @@ if (isset($_GET['action'])) {
                     var dirtyTabs = [];
                     for (var i = 0; i < tabs.length; i++) {
                         if (tabs[i].isDirty && tabs[i].type !== 'browser') {
-                            dirtyTabs.push({
-                                id: tabs[i].id,
-                                filePath: tabs[i].filePath,
-                                fileName: tabs[i].fileName,
-                                tabLabel: tabs[i].tabLabel,
-                                fullTitle: tabs[i].fullTitle,
-                                editorContent: tabs[i].editorContent,
-                                originalContent: tabs[i].originalContent,
-                                cursorPos: tabs[i].cursorPos,
-                                scrollInfo: tabs[i].scrollInfo,
-                                viewMode: tabs[i].viewMode
-                            });
+                            dirtyTabs.push(makeTabBackup(tabs[i]));
                         }
                     }
-                    if (dirtyTabs.length > 0) {
-                        localStorage.setItem('htmlEditorBackupTabs', JSON.stringify(dirtyTabs));
-                    } else {
-                        localStorage.removeItem('htmlEditorBackupTabs');
-                    }
+                    replaceOwnedBackups(dirtyTabs);
                 } catch (e) { }
             }, 2000);
         }
 
         function removeTabBackup(tabId) {
             try {
-                var raw = localStorage.getItem('htmlEditorBackupTabs');
-                if (!raw) return;
-                var arr = JSON.parse(raw);
-                arr = arr.filter(function (b) { return b.id !== tabId; });
-                if (arr.length > 0) {
-                    localStorage.setItem('htmlEditorBackupTabs', JSON.stringify(arr));
-                } else {
-                    localStorage.removeItem('htmlEditorBackupTabs');
-                }
+                var arr = readBackupRecords().filter(function (b) {
+                    return !(b.ownerId === _backupOwnerId && b.id === tabId);
+                });
+                writeBackupRecords(arr);
             } catch (e) { }
         }
 
         function removeAllBackups() {
-            try { localStorage.removeItem('htmlEditorBackupTabs'); } catch (e) { }
+            replaceOwnedBackups([]);
         }
 
         async function restoreBackupTabs() {
             try {
-                var raw = localStorage.getItem('htmlEditorBackupTabs');
-                if (!raw) return;
-                var arr = JSON.parse(raw);
+                var arr = readBackupRecords();
                 if (!arr || !arr.length) return;
+                // Keep only the newest draft for each physical file. Older window
+                // copies can otherwise accumulate and make startup progressively slower.
+                arr.sort(function (a, b) {
+                    return (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0);
+                });
+                var seenBackupFiles = {};
+                arr = arr.filter(function (b) {
+                    var key = b.filePath ? String(b.filePath).replace(/\\/g, '/').toLowerCase()
+                        : 'untitled:' + String(b.ownerId || '') + ':' + String(b.id || '');
+                    if (seenBackupFiles[key]) return false;
+                    seenBackupFiles[key] = true;
+                    return true;
+                });
+                // Read disk baselines in parallel; sequential fetches made every stale
+                // backup add another visible delay to application startup.
+                var diskContents = await Promise.all(arr.map(async function (b) {
+                    if (!b.filePath) return null;
+                    try {
+                        var res = await fetch('?action=load&file=' + encodeURIComponent(b.filePath));
+                        var data = await res.json();
+                        return (data && data.ok) ? (data.content || '') : null;
+                    } catch (loadErr) {
+                        return null;
+                    }
+                }));
                 var restored = 0;
                 var keptBackups = [];
+                var consumedIndexes = [];
                 for (var i = 0; i < arr.length; i++) {
                     var b = arr[i];
                     // Skip if already open
-                    if (b.filePath && findTabByPath(b.filePath)) continue;
-                    var diskContent = null;
-                    if (b.filePath) {
-                        try {
-                            var res = await fetch('?action=load&file=' + encodeURIComponent(b.filePath));
-                            var data = await res.json();
-                            if (data && data.ok) diskContent = data.content || '';
-                        } catch (loadErr) { diskContent = null; }
+                    if (b.filePath && findTabByPath(b.filePath)) {
+                        consumedIndexes.push(i);
+                        continue;
                     }
+                    var diskContent = diskContents[i];
                     var baselineContent = (diskContent !== null) ? diskContent : (b.originalContent || '');
                     var isActuallyDirty = (normalizeHtmlForSyncCompare(b.editorContent || '') !== normalizeHtmlForSyncCompare(baselineContent));
-                    if (!isActuallyDirty) continue;
+                    if (!isActuallyDirty) {
+                        consumedIndexes.push(i);
+                        continue;
+                    }
                     var tab = createTabState({
                         filePath: b.filePath,
                         fileName: b.fileName,
@@ -2870,20 +3137,13 @@ if (isset($_GET['action'])) {
                     // Only restore backups that still differ from the real file on disk.
                     tab.isDirty = true;
                     tabs.push(tab);
-                    keptBackups.push({
-                        id: tab.id,
-                        filePath: tab.filePath,
-                        fileName: tab.fileName,
-                        tabLabel: tab.tabLabel,
-                        fullTitle: tab.fullTitle,
-                        editorContent: tab.editorContent,
-                        originalContent: tab.originalContent,
-                        cursorPos: tab.cursorPos,
-                        scrollInfo: tab.scrollInfo,
-                        viewMode: tab.viewMode
-                    });
+                    keptBackups.push(makeTabBackup(tab));
+                    consumedIndexes.push(i);
                     restored++;
                 }
+                var untouchedBackups = arr.filter(function (_b, idx) {
+                    return consumedIndexes.indexOf(idx) === -1 && _b.ownerId !== _backupOwnerId;
+                });
                 if (restored > 0) {
                     activeTabId = tabs[0].id;
                     restoreTabState(tabs[0]);
@@ -2891,9 +3151,9 @@ if (isset($_GET['action'])) {
                     hideOverlay();
                     // (backup restored silently — dirty star on tab is enough indication)
                     // Clean up backup for tabs that are no longer dirty
-                    localStorage.setItem('htmlEditorBackupTabs', JSON.stringify(keptBackups));
+                    writeBackupRecords(untouchedBackups.concat(keptBackups));
                 } else {
-                    localStorage.removeItem('htmlEditorBackupTabs');
+                    writeBackupRecords(untouchedBackups);
                 }
             } catch (e) { }
         }
@@ -4505,7 +4765,7 @@ if (isset($_GET['action'])) {
                             editor.setValue(rep.html);
                             isSyncFromDesign = false;
                         }
-                        renderTabs();
+                        updateTabPresentation(t);
                     }
                 } catch (err) {
                     console.error(err);
@@ -4584,7 +4844,7 @@ if (isset($_GET['action'])) {
                             editor.setValue(merged.html);
                             isSyncFromDesign = false;
                         }
-                        renderTabs();
+                        updateTabPresentation(t);
                     }
                 } catch (e) {
                     console.error(e);
@@ -4926,6 +5186,7 @@ if (isset($_GET['action'])) {
         let frCurrentMatches = [];
         let frCurrentIdx = -1;
         let frMarks = [];
+        let frDesignMatchCount = 0;
         let _frLastQuery = '';       // last search string used to build matches
         let _frLastCaseSens = false; // last Case Sensitive state
         let _frLastWholeWord = false; // last Whole Word state
@@ -5005,6 +5266,7 @@ if (isset($_GET['action'])) {
         function clearFindMarks() {
             frMarks.forEach(m => m.clear());
             frMarks = [];
+            frDesignMatchCount = 0;
             clearDesignFindHighlights();
         }
 
@@ -5025,13 +5287,13 @@ if (isset($_GET['action'])) {
         function highlightFindInDesign() {
             const iframe = document.getElementById('preview');
             const doc = iframe && iframe.contentDocument;
-            if (!doc || !doc.body) return;
-            if (viewMode !== 'design' && viewMode !== 'split') return;
+            if (!doc || !doc.body) return 0;
+            if (viewMode !== 'design' && viewMode !== 'split') return 0;
 
             clearDesignFindHighlights();
 
             const regex = buildSearchRegex();
-            if (!regex) return;
+            if (!regex) return 0;
 
             // Walk all text nodes in the design body and highlight matches
             const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, {
@@ -5078,6 +5340,7 @@ if (isset($_GET['action'])) {
                     parent.removeChild(node);
                 }
             });
+            return doc.querySelectorAll('mark[data-fr-highlight]').length;
         }
 
         /** Grup regex: un caracter RO indiferent dacă e scris cu sau fără diacritice (inclusiv ş/ţ vechi). */
@@ -5123,28 +5386,12 @@ if (isset($_GET['action'])) {
             }
             const src = editor.getValue();
 
-            // Determine search boundaries.
-            // In design scope, restrict to <!-- ARTICOL START --> … <!-- ARTICOL FINAL -->
-            let searchStart = 0;
-            let searchEnd = src.length;
+            // Design search covers every text node visible in the preview.
             const designScoped = _isFindDesignScoped();
             _frLastDesignScope = designScoped;
 
-            if (designScoped) {
-                const artStartMatch = src.indexOf('<!-- ARTICOL START -->');
-                const artEndMatch = src.indexOf('<!-- ARTICOL FINAL -->');
-                if (artStartMatch !== -1 && artEndMatch !== -1 && artEndMatch > artStartMatch) {
-                    searchStart = artStartMatch + '<!-- ARTICOL START -->'.length;
-                    searchEnd = artEndMatch;
-                }
-            }
-
             let m;
             while ((m = regex.exec(src)) !== null) {
-                // Skip matches outside the search boundaries
-                if (m.index < searchStart) continue;
-                if (m.index + m[0].length > searchEnd) break;
-
                 const from = editor.posFromIndex(m.index);
                 const to = editor.posFromIndex(m.index + m[0].length);
                 frCurrentMatches.push({ from, to, index: m.index, length: m[0].length });
@@ -5154,9 +5401,15 @@ if (isset($_GET['action'])) {
                 });
                 frMarks.push(mark);
             }
-            document.getElementById('frInfo').textContent = frCurrentMatches.length + ' rezultate gasite';
-            // Also highlight matches in the Design panel
-            highlightFindInDesign();
+            frDesignMatchCount = highlightFindInDesign();
+            const resultCount = designScoped ? frDesignMatchCount : frCurrentMatches.length;
+            document.getElementById('frInfo').textContent = resultCount === 1
+                ? '1 rezultat gasit'
+                : resultCount + ' rezultate gasite';
+        }
+
+        function getFindResultCount() {
+            return _isFindDesignScoped() ? frDesignMatchCount : frCurrentMatches.length;
         }
 
         // Rebuild match list only when query or options changed since last search.
@@ -5166,7 +5419,7 @@ if (isset($_GET['action'])) {
             const ww = document.getElementById('frWholeWord').checked;
             const ds = _isFindDesignScoped();
             if (q === _frLastQuery && cs === _frLastCaseSens && ww === _frLastWholeWord
-                && ds === _frLastDesignScope && frCurrentMatches.length > 0) {
+                && ds === _frLastDesignScope && getFindResultCount() > 0) {
                 return; // matches are still valid
             }
             _frLastQuery = q;
@@ -5193,30 +5446,33 @@ if (isset($_GET['action'])) {
 
         function findNext() {
             _ensureFindMatches();
-            if (frCurrentMatches.length === 0) {
+            const resultCount = getFindResultCount();
+            if (resultCount === 0) {
                 document.getElementById('frInfo').textContent = 'Niciun rezultat';
                 return;
             }
-            frCurrentIdx = (frCurrentIdx + 1) % frCurrentMatches.length;
+            frCurrentIdx = (frCurrentIdx + 1) % resultCount;
             goToMatch(frCurrentIdx);
         }
 
         function findPrev() {
             _ensureFindMatches();
-            if (frCurrentMatches.length === 0) {
+            const resultCount = getFindResultCount();
+            if (resultCount === 0) {
                 document.getElementById('frInfo').textContent = 'Niciun rezultat';
                 return;
             }
-            frCurrentIdx = (frCurrentIdx - 1 + frCurrentMatches.length) % frCurrentMatches.length;
+            frCurrentIdx = (frCurrentIdx - 1 + resultCount) % resultCount;
             goToMatch(frCurrentIdx);
         }
 
         function goToMatch(idx) {
             const match = frCurrentMatches[idx];
-            if (!match) return;
-            editor.setSelection(match.from, match.to);
-            editor.scrollIntoView({ from: match.from, to: match.to }, 80);
-            editor.focus();
+            if (match) {
+                editor.setSelection(match.from, match.to);
+                editor.scrollIntoView({ from: match.from, to: match.to }, 80);
+                if (viewMode === 'code') editor.focus();
+            }
             // Scroll to the active match in Design panel and highlight it
             try {
                 if (viewMode === 'design' || viewMode === 'split') {
@@ -5225,8 +5481,9 @@ if (isset($_GET['action'])) {
             } catch (e) {
                 // daca apare vreo eroare, nu blocam cautarea in cod
             }
+            const resultCount = getFindResultCount();
             document.getElementById('frInfo').textContent =
-                'Rezultat ' + (idx + 1) + ' din ' + frCurrentMatches.length;
+                'Rezultat ' + (idx + 1) + ' din ' + resultCount;
         }
 
         function scrollToDesignMatch(idx) {
@@ -5245,9 +5502,20 @@ if (isset($_GET['action'])) {
             // but usually they correspond, so we use min(idx, marks.length-1)
             const activeIdx = Math.min(idx, marks.length - 1);
             if (marks[activeIdx]) {
-                marks[activeIdx].style.background = 'rgba(255, 140, 0, 0.8)';
-                marks[activeIdx].style.outline = '2px solid #f59e0b';
-                marks[activeIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+                const activeMark = marks[activeIdx];
+                activeMark.style.background = 'rgba(255, 140, 0, 0.8)';
+                activeMark.style.outline = '2px solid #f59e0b';
+                activeMark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+                const win = iframe.contentWindow;
+                const selection = win && win.getSelection ? win.getSelection() : null;
+                if (selection) {
+                    const range = doc.createRange();
+                    range.selectNodeContents(activeMark);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    rememberDesignSelectionRange(win, doc);
+                }
             }
         }
 
@@ -5355,6 +5623,13 @@ if (isset($_GET['action'])) {
                 tabSize: 4
             });
             window.editor = editor;
+            // CodeMirror may scroll the outer page to reveal its cursor, even while
+            // hidden in Design. Background synchronization must not move the viewport.
+            editor.on('scrollCursorIntoView', (cm, event) => {
+                if (viewMode === 'design' || isSyncFromDesign || isSelectionFromDesign) {
+                    event.preventDefault();
+                }
+            });
             editor.setSize('100%', '100%');
             // Diacritice românești în editorul de cod
             editor.addKeyMap({
@@ -5419,9 +5694,59 @@ if (isset($_GET['action'])) {
                     const m = html.slice(idx).match(/^\s*<p\s+class\s*=\s*["']text_obisnuit["']\s*>\s*<\/p>/i);
                     return m ? m[0].length : 0;
                 }
+                function htmlToPlainTextForCompare(html) {
+                    const tmp = document.createElement('div');
+                    tmp.innerHTML = String(html || '').replace(/<br\s*\/?>/gi, '\n');
+                    return (tmp.textContent || tmp.innerText || '').replace(/\u00a0/g, ' ');
+                }
+                function normalizeTextForCompare(value) {
+                    return String(value || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+                }
+                function replaceFullSpanTextObisnuitSelection() {
+                    if (fromIdx >= toIdx) return false;
+                    const rawMulti = clipToPlainMultiline(change.text);
+                    const parts = normalizeParagraphChunks(rawMulti, 1);
+                    if (!parts.length) return false;
+                    const selectedPlain = normalizeTextForCompare(htmlToPlainTextForCompare(src.slice(fromIdx, toIdx)));
+                    if (!selectedPlain) return false;
+                    const fullSpanRe = /(<p\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit\b[^"']*["'][^>]*>)(\s*<span\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit2\b[^"']*["'][^>]*>)([\s\S]*?)(<\/span>\s*<\/p>)/gi;
+                    let m;
+                    while ((m = fullSpanRe.exec(src)) !== null) {
+                        const pStart = m.index;
+                        const pEnd = m.index + m[0].length;
+                        const innerStart = m.index + m[1].length + m[2].length;
+                        const innerEnd = innerStart + m[3].length;
+                        const selectionWithinParagraph = fromIdx >= pStart && toIdx <= pEnd;
+                        const selectionCoversInner = fromIdx <= innerStart && toIdx >= innerEnd;
+                        const selectionInsideInner = fromIdx >= innerStart && toIdx <= innerEnd;
+                        if (!selectionWithinParagraph && !selectionCoversInner && !selectionInsideInner) continue;
+                        if (selectedPlain !== normalizeTextForCompare(htmlToPlainTextForCompare(m[3]))) continue;
+                        const lineStart = src.lastIndexOf('\n', pStart - 1) + 1;
+                        const indent = (src.slice(lineStart, pStart).match(/^\s*/) || [''])[0];
+                        let replacement;
+                        if (parts.length === 1) {
+                            replacement = m[1] + escapeHtmlText(parts[0]) + '</p>';
+                        } else {
+                            replacement = parts.map(function (part, idx) {
+                                const pOpen = idx === 0 ? m[1] : '<p class="text_obisnuit">';
+                                return (idx === 0 ? '' : indent) + pOpen + escapeHtmlText(part) + '</p>';
+                            }).join('\n');
+                        }
+                        change.cancel();
+                        cm.operation(function () {
+                            cm.replaceRange(replacement, cm.posFromIndex(pStart), cm.posFromIndex(pEnd));
+                            cm.setCursor(cm.posFromIndex(pStart + replacement.length));
+                        });
+                        return true;
+                    }
+                    return false;
+                }
 
                 // Non-empty selection that looks like one or more <p>…</p> → replace with plain text_obisnuit blocks only.
                 if (fromIdx < toIdx) {
+                    if (replaceFullSpanTextObisnuitSelection()) {
+                        return true;
+                    }
                     const sel = src.slice(fromIdx, toIdx);
                     const nPOpen = (sel.match(/<p\b/gi) || []).length;
                     const nPClose = (sel.match(/<\/p>/gi) || []).length;
@@ -6171,8 +6496,20 @@ if (isset($_GET['action'])) {
             try {
                 var rawContent = editor.getValue();
                 var contentToSave = rawContent;
+                if (isCurrentFileHtml() && typeof removePasteWhitespaceNormalSpansFromHtml === 'function') {
+                    contentToSave = removePasteWhitespaceNormalSpansFromHtml(contentToSave);
+                }
+                if (isCurrentFileHtml() && typeof removeOrphanClosingSpansFromParagraphs === 'function') {
+                    contentToSave = removeOrphanClosingSpansFromParagraphs(contentToSave);
+                }
+                if (isCurrentFileHtml() && typeof normalizeTextParagraphInlineFormatting === 'function') {
+                    contentToSave = normalizeTextParagraphInlineFormatting(contentToSave);
+                }
+                if (isCurrentFileHtml() && typeof joinSasaParagraphClosingTags === 'function') {
+                    contentToSave = joinSasaParagraphClosingTags(contentToSave);
+                }
                 if (isCurrentFileHtml() && typeof applySasaTeaserToMetaDescription === 'function') {
-                    contentToSave = applySasaTeaserToMetaDescription(rawContent);
+                    contentToSave = applySasaTeaserToMetaDescription(contentToSave);
                 }
                 if (isCurrentFileHtml() && typeof applyH1ToPageTitles === 'function') {
                     contentToSave = applyH1ToPageTitles(contentToSave);
@@ -6206,10 +6543,21 @@ if (isset($_GET['action'])) {
                     } catch (eReload) { /* păstrăm contentToSave */ }
                 }
                 if (contentToSave !== rawContent) {
+                    const codeScroll = editor.getScrollInfo();
+                    const codeSelections = editor.listSelections();
+                    const wasSyncFromDesign = isSyncFromDesign;
                     isSyncFromDesign = true;
-                    editor.setValue(contentToSave);
-                    isSyncFromDesign = false;
-                    if (typeof applyCodeToDesignPanel === 'function') applyCodeToDesignPanel();
+                    try {
+                        editor.operation(() => {
+                            editor.setValue(contentToSave);
+                            editor.setSelections(codeSelections, undefined, { scroll: false });
+                            editor.scrollTo(codeScroll.left, codeScroll.top);
+                        });
+                    } finally {
+                        isSyncFromDesign = wasSyncFromDesign;
+                    }
+                    // Save-time normalization updates the source only. Keep the live Design
+                    // DOM, selection and scroll intact; the clean baseline is recorded below.
                 }
                 if (data.metaSynced || contentToSave !== rawContent) {
                     toast('Meta description și titluri pagină actualizate din articol (SASA-1 / H1).');
@@ -6228,15 +6576,12 @@ if (isset($_GET['action'])) {
                         if (_newTail) tab.protectedBodyScriptTail = _newTail;
                         lastDesignSnapshot = getDesignBodyHtml();
                         tab.lastDesignSnapshot = lastDesignSnapshot;
-                        var hasDesignHistoryAtSave = (designUndoStack && designUndoStack.length > 0) ||
-                            (designRedoStack && designRedoStack.length > 0);
-                        if (!hasDesignHistoryAtSave) {
-                            tab.designCleanCode = contentToSave;
-                            designCleanCode = contentToSave;
-                            designCleanBodyHtml = lastDesignSnapshot;
-                        } else {
-                            tab.designCleanCode = designCleanCode;
-                        }
+                        // Save always establishes a new clean baseline. Keep the undo/redo
+                        // history, but compare future Design syncs with what was just saved,
+                        // not with the version that was clean before the edit.
+                        designCleanCode = contentToSave;
+                        designCleanBodyHtml = lastDesignSnapshot;
+                        tab.designCleanCode = designCleanCode;
                         tab.designCleanBodyHtml = designCleanBodyHtml;
                         tab.designUndoStack = designUndoStack.slice();
                         tab.designRedoStack = designRedoStack.slice();
@@ -6251,7 +6596,7 @@ if (isset($_GET['action'])) {
                             await syncArticleBlockToCategoryAndIndexAfterSave(currentFile, tab.originalContent);
                         }
                         tab.categorySyncDescriptionBaseline = getCategorySyncDescriptionFromArticleHtml(tab.originalContent);
-                        renderTabs();
+                        updateTabPresentation(tab);
                     }
                 }
                 // Silent save: NO preview reload — avoids page flicker
@@ -6273,7 +6618,7 @@ if (isset($_GET['action'])) {
         // Compares old body HTML (from code editor) with new innerHTML (from design
         // panel) and restores the original tag variant wherever the browser swapped it.
         function preserveEquivTags(oldBodyContent, newBodyContent) {
-            var EQUIV = {'i':'em','em':'i','b':'strong','strong':'b'};
+            var EQUIV = {'b':'strong','strong':'b'};
             // Extract all tags with their positions
             function extractTags(html) {
                 var result = [];
@@ -6453,6 +6798,141 @@ if (isset($_GET['action'])) {
             );
         }
 
+        function removeOrphanClosingSpansFromParagraphs(html) {
+            return String(html || '').replace(
+                /(<p\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit2?\b[^"']*["'][^>]*>)([\s\S]*?)(<\/p>)/gi,
+                function (_match, pOpen, inner, pClose) {
+                    let depth = 0;
+                    inner = String(inner || '').replace(/<\/?span\b[^>]*>/gi, function (tag) {
+                        if (/^<\s*span\b/i.test(tag)) {
+                            depth++;
+                            return tag;
+                        }
+                        if (depth > 0) {
+                            depth--;
+                            return tag;
+                        }
+                        return '';
+                    });
+                    return pOpen + inner + pClose;
+                }
+            );
+        }
+
+        function isPasteWhitespaceNormalStyle(styleValue) {
+            var cleaned = String(styleValue || '')
+                .replace(/\/\*[\s\S]*?\*\//g, '')
+                .replace(/\s+/g, ' ')
+                .replace(/\s*:\s*/g, ':')
+                .replace(/\s*;\s*/g, ';')
+                .replace(/;$/g, '')
+                .trim()
+                .toLowerCase();
+            return cleaned === 'white-space:normal';
+        }
+
+        function removePasteWhitespaceNormalSpansFromHtml(html) {
+            var out = String(html || '');
+            var before;
+            do {
+                before = out;
+                out = out.replace(/<span\b([^>]*)>([\s\S]*?)<\/span>/gi, function (match, attrs, inner) {
+                    attrs = String(attrs || '');
+                    var styleMatch = /\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(attrs);
+                    if (!styleMatch) return match;
+                    var styleValue = styleMatch[1] || styleMatch[2] || styleMatch[3] || '';
+                    var restAttrs = attrs.replace(/\s*\bstyle\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/i, '').trim();
+                    if (restAttrs || !isPasteWhitespaceNormalStyle(styleValue)) return match;
+                    return inner;
+                });
+            } while (out !== before);
+            return out;
+        }
+
+        function removePasteWhitespaceNormalSpansFromDom(root) {
+            if (!root || !root.querySelectorAll) return false;
+            var changed = false;
+            Array.prototype.slice.call(root.querySelectorAll('span[style]')).forEach(function (span) {
+                var attrs = Array.prototype.slice.call(span.attributes || []);
+                var nonStyleAttrs = attrs.filter(function (attr) {
+                    return String(attr.name || '').toLowerCase() !== 'style';
+                });
+                if (nonStyleAttrs.length || !isPasteWhitespaceNormalStyle(span.getAttribute('style'))) return;
+                var parent = span.parentNode;
+                if (!parent) return;
+                while (span.firstChild) parent.insertBefore(span.firstChild, span);
+                parent.removeChild(span);
+                parent.normalize();
+                changed = true;
+            });
+            return changed;
+        }
+
+        function normalizeFullTextObisnuit2SpanParagraphs(html) {
+            html = removeOrphanClosingSpansFromParagraphs(html);
+            return String(html || '').replace(
+                /(<p\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit\b[^"']*["'][^>]*>)\s*<span\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit2\b[^"']*["'][^>]*>([\s\S]*?)<\/span>\s*(<\/p>)/gi,
+                function (_match, pOpen, inner, pClose) {
+                    return pOpen + inner + pClose;
+                }
+            );
+        }
+
+        function normalizeTextParagraphInlineFormatting(html) {
+            var out = String(html || '').replace(
+                /(<p\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit2?\b[^"']*["'][^>]*>)([\s\S]*?)(<\/p>)/gi,
+                function (_match, pOpen, inner, pClose) {
+                    var depths = {};
+                    inner = String(inner || '').replace(/<i\s*>/gi, '<em>').replace(/<\/i>/gi, '</em>');
+                    inner = inner.replace(/<\/?(em|strong|u)\b[^>]*>/gi, function (tag, name) {
+                        name = String(name || '').toLowerCase();
+                        depths[name] = depths[name] || 0;
+                        if (new RegExp('^<\\s*' + name + '\\b', 'i').test(tag)) {
+                            depths[name]++;
+                            return tag;
+                        }
+                        if (depths[name] > 0) {
+                            depths[name]--;
+                            return tag;
+                        }
+                        return '';
+                    });
+                    var before;
+                    do {
+                        before = inner;
+                        inner = inner
+                            .replace(/<(em|strong|u)\b[^>]*>\s*<\/\1>/gi, '')
+                            .replace(/<em>\s*<em>/gi, '<em>')
+                            .replace(/<\/em>\s*<\/em>/gi, '</em>');
+                    } while (inner !== before);
+                    return pOpen + inner + pClose;
+                }
+            );
+            return out.replace(
+                /^[\t ]*<p\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit2?\b[^"']*["'][^>]*>\s*(?:<(?:em|i|strong|b|u)\b[^>]*>\s*<\/(?:em|i|strong|b|u)>\s*)+<\/p>\s*\r?\n?/gmi,
+                ''
+            );
+        }
+
+        function joinSasaParagraphClosingTags(html) {
+            return String(html || '').replace(
+                /(<!--\s*SASA-1\s*-->)([\s\S]*?)(<!--\s*SASA-2\s*-->)/gi,
+                function (_zoneMatch, marker1, zoneBody, marker2) {
+                    zoneBody = zoneBody.replace(
+                        /(<p\b[^>]*\bclass\s*=\s*["'][^"']*\btext_obisnuit2?\b[^"']*["'][^>]*>)([\s\S]*?)(<\/p>)/gi,
+                        function (_pMatch, pOpen, inner, pClose) {
+                            inner = inner.replace(
+                                /[\t ]*(?:\r?\n[\t ]*)+(?=(?:<\/(?:em|i|strong|b|u)>[\t ]*)*$)/i,
+                                ''
+                            );
+                            return pOpen + inner + pClose;
+                        }
+                    );
+                    return marker1 + zoneBody + marker2;
+                }
+            );
+        }
+
         function designSelectionHasCssClass(el, className) {
             if (!el || !className) return false;
             var node = el;
@@ -6531,7 +7011,7 @@ if (isset($_GET['action'])) {
             if (designJsIdx !== -1) {
                 core = core.slice(0, designJsIdx).trimEnd();
             } else {
-                core = core.replace(/(?:\s*<!--[\s\S]*?-->[\s]*)+$/i, '').trimEnd();
+                core = core.replace(/(?:\s*<!--(?:(?!-->)[\s\S])*-->\s*)+$/i, '').trimEnd();
             }
             return core + '\n    ' + tail + '\n';
         }
@@ -6559,8 +7039,10 @@ if (isset($_GET['action'])) {
             // Remove CROP highlight from DOM before reading so it never persists to code
             clearSasaDesignHighlight(doc);
             cleanupParagraphBoundaryBrArtifacts(doc);
+            removePasteWhitespaceNormalSpansFromDom(doc.body);
             // Replace &nbsp; with regular space in SASA region and h1.den_articol
             var rawInner = cleanNbspInHtml(doc.body.innerHTML);
+            rawInner = removePasteWhitespaceNormalSpansFromHtml(rawInner);
             // Remove data-orig-class helper attribute so it never persists to saved code
             rawInner = rawInner.replace(/\s*data-orig-class="[^"]*"/gi, '');
             // Safety net: fold accidental orphan text back into the emptied block
@@ -6576,7 +7058,10 @@ if (isset($_GET['action'])) {
             );
             rawInner = normalizeBlockWrappedInlineFormat(rawInner, 'em');
             rawInner = normalizeBlockWrappedInlineFormat(rawInner, 'strong');
+            rawInner = normalizeBlockWrappedInlineFormat(rawInner, 'u');
             rawInner = normalizeSpanWrappedParagraphClass(rawInner);
+            rawInner = removeOrphanClosingSpansFromParagraphs(rawInner);
+            rawInner = normalizeTextParagraphInlineFormatting(rawInner);
             // Note: space collapsing is handled per-node in collapseSpacesInDesignDOM()
             // to avoid destroying indentation in the code editor.
             // Ensure line breaks between block-level elements (Design outputs them on one line)
@@ -6647,7 +7132,12 @@ if (isset($_GET['action'])) {
             doc.body.contentEditable = 'true';
             ensureDesignWhitespaceEditingStyle(doc);
             // Track that design panel was last focused (for Find scope in split mode)
-            doc.addEventListener('mousedown', () => { _frDesignWasLastFocused = true; });
+            doc.addEventListener('mousedown', () => {
+                _frDesignWasLastFocused = true;
+                // A click inside Design starts a genuinely new selection. Toolbar
+                // clicks happen in the parent document and must keep the last range.
+                lastDesignSelectionRange = null;
+            });
             // Block text drag-and-drop in design panel (prevents accidental moves)
             doc.addEventListener('dragstart', function (e) { e.preventDefault(); });
             doc.addEventListener('drop', function (e) { e.preventDefault(); });
@@ -6787,6 +7277,93 @@ if (isset($_GET['action'])) {
                     !el.querySelector('img, hr, input, iframe, video, svg, canvas'));
             }
 
+            function rangeIntersectsPasteNode(range, node) {
+                if (!range || !node) return false;
+                try {
+                    return range.intersectsNode(node);
+                } catch (e) {
+                    try {
+                        const nodeRange = doc.createRange();
+                        nodeRange.selectNode(node);
+                        return range.compareBoundaryPoints(Range.START_TO_END, nodeRange) < 0 &&
+                            range.compareBoundaryPoints(Range.END_TO_START, nodeRange) > 0;
+                    } catch (_) {
+                        return false;
+                    }
+                }
+            }
+
+            function pasteBoundaryBlock(range, atStart) {
+                let container = atStart ? range.startContainer : range.endContainer;
+                const offset = atStart ? range.startOffset : range.endOffset;
+                if (container && container.nodeType === Node.ELEMENT_NODE) {
+                    let child = null;
+                    if (atStart) {
+                        child = container.childNodes[offset] || container.childNodes[offset - 1] || null;
+                    } else {
+                        child = container.childNodes[offset - 1] || container.childNodes[offset] || null;
+                    }
+                    if (child) {
+                        if (child.nodeType === Node.TEXT_NODE) return closestPasteBlock(child);
+                        if (child.nodeType === Node.ELEMENT_NODE) {
+                            if (/^(?:P|H[1-6])$/.test(child.nodeName)) return child;
+                            return child.closest ? child.closest('p,h1,h2,h3,h4,h5,h6') : null;
+                        }
+                    }
+                }
+                return closestPasteBlock(container);
+            }
+
+            function pasteIntoWholeSelectedBlockText(range, text, sel) {
+                const selectedText = normalizePasteCompareText(range.toString());
+                if (!selectedText) return false;
+                const candidates = [];
+                function addCandidate(block) {
+                    if (!block || !/^(?:P|H[1-6])$/.test(block.nodeName)) return;
+                    if (candidates.indexOf(block) === -1) candidates.push(block);
+                }
+                addCandidate(closestPasteBlock(range.startContainer));
+                addCandidate(closestPasteBlock(range.endContainer));
+                addCandidate(pasteBoundaryBlock(range, true));
+                addCandidate(pasteBoundaryBlock(range, false));
+
+                let target = null;
+                for (let i = 0; i < candidates.length; i++) {
+                    if (normalizePasteCompareText(candidates[i].textContent) === selectedText) {
+                        target = candidates[i];
+                        break;
+                    }
+                }
+                if (!target) {
+                    let root = range.commonAncestorContainer;
+                    if (root && root.nodeType !== Node.ELEMENT_NODE) root = root.parentNode;
+                    if (!root || !root.querySelectorAll) root = doc.body;
+                    const blocks = root.querySelectorAll('p, h1, h2, h3, h4, h5, h6');
+                    for (let i = 0; i < blocks.length; i++) {
+                        if (!rangeIntersectsPasteNode(range, blocks[i])) continue;
+                        if (normalizePasteCompareText(blocks[i].textContent) === selectedText) {
+                            target = blocks[i];
+                            break;
+                        }
+                    }
+                }
+                if (!target) return false;
+
+                target.textContent = text;
+                target.normalize();
+                let caretNode = target.lastChild;
+                if (!caretNode || caretNode.nodeType !== Node.TEXT_NODE) {
+                    caretNode = doc.createTextNode('');
+                    target.appendChild(caretNode);
+                }
+                const newRange = doc.createRange();
+                newRange.setStart(caretNode, caretNode.nodeValue.length);
+                newRange.setEnd(caretNode, caretNode.nodeValue.length);
+                sel.removeAllRanges();
+                sel.addRange(newRange);
+                return true;
+            }
+
             // Paste over a fully-wrapped block: put the text INSIDE the existing
             // tag (keeping the tag name, class and all attributes) instead of
             // letting deleteContents destroy the tag.
@@ -6858,6 +7435,20 @@ if (isset($_GET['action'])) {
                 return true;
             }
 
+            function htmlClipboardToPlainText(html) {
+                if (!html) return '';
+                const tmp = doc.createElement('div');
+                tmp.innerHTML = html;
+                return tmp.innerText || tmp.textContent || '';
+            }
+
+            function finishPlainTextPaste() {
+                removePasteWhitespaceNormalSpansFromDom(doc.body);
+                cleanupParagraphBoundaryBrArtifacts(doc);
+                clearTimeout(designInputDebounceTimer);
+                designInputDebounceTimer = setTimeout(syncFromDesign, 80);
+            }
+
             doc.addEventListener('paste', (e) => {
                 // Force copy-paste to insert as plain text so we don't bring in
                 // inline styles, spans, or classes from external sources (e.g. Google Translate).
@@ -6865,7 +7456,11 @@ if (isset($_GET['action'])) {
                 // because execCommand can destroy parent DOM structure (tags, classes,
                 // links) when replacing the entire content of an element.
                 e.preventDefault();
-                let text = (e.clipboardData || window.clipboardData).getData('text/plain');
+                e.stopPropagation();
+                if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+                const clipboard = e.clipboardData || window.clipboardData;
+                let text = clipboard ? clipboard.getData('text/plain') : '';
+                if (!text && clipboard) text = htmlClipboardToPlainText(clipboard.getData('text/html'));
                 if (!text) return;
                 // Collapse multiple consecutive spaces into one
                 text = text.replace(/ {2,}/g, ' ');
@@ -6876,8 +7471,11 @@ if (isset($_GET['action'])) {
                 const range = sel.getRangeAt(0);
                 const pasteParagraphs = splitPlainTextIntoPasteParagraphs(text);
                 if (insertPlainTextParagraphsAtSelection(range, pasteParagraphs)) {
-                    clearTimeout(designInputDebounceTimer);
-                    designInputDebounceTimer = setTimeout(syncFromDesign, 80);
+                    finishPlainTextPaste();
+                    return;
+                }
+                if (pasteIntoWholeSelectedBlockText(range, text, sel)) {
+                    finishPlainTextPaste();
                     return;
                 }
 
@@ -6928,7 +7526,6 @@ if (isset($_GET['action'])) {
                     range.deleteContents();
                     const textNode = doc.createTextNode(text);
                     range.insertNode(textNode);
-                    if (textNode.parentNode) textNode.parentNode.normalize();
 
                     // If text ended up outside a <p>/<h*> block (direct child of body
                     // or of a structural container div), it would serialize as orphan
@@ -6992,9 +7589,8 @@ if (isset($_GET['action'])) {
                         sel.addRange(newRange);
                     }
                 }
-                clearTimeout(designInputDebounceTimer);
-                designInputDebounceTimer = setTimeout(syncFromDesign, 80);
-            });
+                finishPlainTextPaste();
+            }, true);
             doc.body.addEventListener('input', () => {
                 if (isApplyingUndoRedo) return;
                 if (_suppressInputAfterCopy) return;
@@ -7034,13 +7630,16 @@ if (isset($_GET['action'])) {
             doc.addEventListener('selectionchange', () => {
                 clearTimeout(_selChangeTimer);
                 _selChangeTimer = setTimeout(() => {
+                    rememberDesignSelectionRange(iframe.contentWindow, doc);
                     if (!isSelectionFromCode) updatePropertiesPanelFromSelection();
                 }, 60);
             });
             doc.addEventListener('mouseup', () => {
+                rememberDesignSelectionRange(iframe.contentWindow, doc);
                 updatePropertiesPanelFromSelection();
             });
             doc.addEventListener('keyup', () => {
+                rememberDesignSelectionRange(iframe.contentWindow, doc);
                 updatePropertiesPanelFromSelection();
             });
             // ── Intercept mousedown on images inside anchors so we can
@@ -7550,12 +8149,16 @@ if (isset($_GET['action'])) {
         // so makeDesignEditable runs as soon as the DOM is parsed — not after
         // all external CSS/fonts finish loading (which can take 30+ seconds).
         window.__previewDOMReady = null;
+        var _previewRequestSeq = 0;
 
         // When set, updatePreview will restore this scroll position after reload.
         var _pendingPreviewScroll = null;
 
         function updatePreview() {
             const iframe = document.getElementById('preview');
+            const previewRequestId = ++_previewRequestSeq;
+            const requestedFile = currentFile;
+            const requestedTabId = activeTabId;
 
             // Files with a known path on disk → use PHP preview.
             // PHP strips scripts/loaders, rebuilds clean HTML, and serves it
@@ -7563,10 +8166,19 @@ if (isset($_GET['action'])) {
             // (blob: URLs have issues with "preferred" stylesheets and encoded paths).
             if (currentFile) {
                 let done = false;
+                const previewToken = String(previewRequestId);
                 const scrollToRestore = _pendingPreviewScroll;
                 _pendingPreviewScroll = null;
-                const doEdit = () => {
-                    if (done) return;
+                const doEdit = (loadedUrl) => {
+                    if (done || previewRequestId !== _previewRequestSeq ||
+                        requestedTabId !== activeTabId || requestedFile !== currentFile) return;
+                    let actualUrl = (typeof loadedUrl === 'string') ? loadedUrl : '';
+                    if (!actualUrl) {
+                        try { actualUrl = iframe.contentWindow.location.href || ''; } catch (e) { actualUrl = ''; }
+                    }
+                    // A previous tab may finish DOMContentLoaded after this callback was
+                    // replaced. Ignore it unless the loaded document belongs to this request.
+                    if (actualUrl && actualUrl.indexOf('previewToken=' + previewToken) === -1) return;
                     done = true;
                     if (isCurrentFileHtml()) makeDesignEditable();
                     // Dacă un tab de browser este deschis, ne asigurăm că iframe-ul lui rămâne pe URL-ul curent din tab
@@ -7588,8 +8200,13 @@ if (isset($_GET['action'])) {
                     }
                 };
                 window.__previewDOMReady = doEdit;
-                iframe.onload = doEdit;
-                iframe.src = '?action=preview&file=' + encodeURIComponent(currentFile) + '&t=' + Date.now();
+                iframe.onload = function () {
+                    let loadedUrl = '';
+                    try { loadedUrl = iframe.contentWindow.location.href || ''; } catch (e) { loadedUrl = ''; }
+                    doEdit(loadedUrl);
+                };
+                iframe.src = '?action=preview&file=' + encodeURIComponent(currentFile) +
+                    '&t=' + Date.now() + '&previewToken=' + previewToken;
                 return;
             }
 
@@ -7707,9 +8324,59 @@ if (isset($_GET['action'])) {
             const doc = iframe.contentDocument;
             if (!win || !doc) return null;
             const sel = win.getSelection();
-            if (!sel || sel.rangeCount === 0) return null;
+            if (!sel || sel.rangeCount === 0) {
+                return restoreLastDesignSelectionRange(win, doc);
+            }
             const range = sel.getRangeAt(0);
+            if (range && !range.collapsed) {
+                rememberDesignSelectionRange(win, doc);
+                return { win, doc, sel, range };
+            }
+            const restored = restoreLastDesignSelectionRange(win, doc);
+            if (restored) return restored;
             return { win, doc, sel, range };
+        }
+
+        function isUsableDesignRange(range, doc) {
+            try {
+                return !!(range && doc && doc.body && !range.collapsed &&
+                    range.startContainer && range.endContainer &&
+                    range.startContainer.isConnected && range.endContainer.isConnected &&
+                    doc.body.contains(range.startContainer) && doc.body.contains(range.endContainer));
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function rememberDesignSelectionRange(win, doc) {
+            try {
+                const sel = win && win.getSelection ? win.getSelection() : null;
+                if (!sel || sel.rangeCount === 0) return;
+                const range = sel.getRangeAt(0);
+                if (!range || range.collapsed) return;
+                lastDesignSelectionRange = { doc: doc, range: range.cloneRange(), text: sel.toString() };
+            } catch (e) {
+                lastDesignSelectionRange = null;
+            }
+        }
+
+        function restoreLastDesignSelectionRange(win, doc) {
+            if (!lastDesignSelectionRange || lastDesignSelectionRange.doc !== doc) return null;
+            const saved = lastDesignSelectionRange.range;
+            if (!isUsableDesignRange(saved, doc)) {
+                lastDesignSelectionRange = null;
+                return null;
+            }
+            try {
+                const sel = win.getSelection();
+                const range = saved.cloneRange();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                return { win, doc, sel, range };
+            } catch (e) {
+                lastDesignSelectionRange = null;
+                return null;
+            }
         }
 
         function getDesignSelectionText() {
@@ -8211,6 +8878,7 @@ if (isset($_GET['action'])) {
             const sizeSel = document.getElementById('propSize');
             const boldBtn = document.getElementById('propBold');
             const italicBtn = document.getElementById('propItalic');
+            const underlineBtn = document.getElementById('propUnderline');
             const colorInp = document.getElementById('propColor');
             const bgInp = document.getElementById('propBg');
             const classSel = document.getElementById('propClass');
@@ -8264,8 +8932,11 @@ if (isset($_GET['action'])) {
             }
             boldBtn.style.background = (computed.fontWeight === '700' || computed.fontWeight === 'bold') ? 'rgba(59,130,246,0.3)' : '';
             italicBtn.style.background = computed.fontStyle === 'italic' ? 'rgba(59,130,246,0.3)' : '';
+            if (underlineBtn) underlineBtn.style.background = ((computed.textDecorationLine || computed.textDecoration || '').indexOf('underline') !== -1) ? 'rgba(59,130,246,0.3)' : '';
             const quickItalicBtn = document.getElementById('btnQuickItalic');
             if (quickItalicBtn) quickItalicBtn.style.background = italicBtn.style.background;
+            const quickUnderlineBtn = document.getElementById('btnQuickUnderline');
+            if (quickUnderlineBtn && underlineBtn) quickUnderlineBtn.style.background = underlineBtn.style.background;
             colorInp.value = rgbToHex(computed.color) || '#000000';
             bgInp.value = rgbToHex(computed.backgroundColor) || '#ffffff';
             if (classSel) {
@@ -8425,9 +9096,14 @@ if (isset($_GET['action'])) {
         function getSelectedTextBlocks(doc, range) {
             if (!doc || !doc.body || !range) return [];
             var selector = 'p, div, h1, h2, h3, h4, h5, h6, li, td, th, blockquote';
-            return Array.from(doc.body.querySelectorAll(selector)).filter(function (block) {
+            var blocks = Array.from(doc.body.querySelectorAll(selector)).filter(function (block) {
                 if (!range.intersectsNode(block)) return false;
                 return rangeIntersectsNonEmptyText(doc, range, block);
+            });
+            return blocks.filter(function (block) {
+                return !blocks.some(function (other) {
+                    return other !== block && block.contains(other);
+                });
             });
         }
 
@@ -8464,7 +9140,91 @@ if (isset($_GET['action'])) {
             return !!(range && range.toString && range.toString().trim());
         }
 
+        function normalizeInlineSelectionText(value) {
+            return String(value || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+        }
+
+        function selectionCoversWholeBlockText(range, block) {
+            if (!range || !block) return false;
+            var selectedText = normalizeInlineSelectionText(range.toString());
+            var blockText = normalizeInlineSelectionText(block.textContent || '');
+            return !!blockText && selectedText === blockText;
+        }
+
+        function closestInlineFormattingBlock(node) {
+            var selector = 'p,div,h1,h2,h3,h4,h5,h6,li,td,th,blockquote';
+            var el = node && node.nodeType === Node.ELEMENT_NODE ? node : (node ? node.parentElement : null);
+            return el && el.closest ? el.closest(selector) : null;
+        }
+
+        function getCommonInlineFormattingBlock(range) {
+            if (!range) return null;
+            var startBlock = closestInlineFormattingBlock(range.startContainer);
+            var endBlock = closestInlineFormattingBlock(range.endContainer);
+            return startBlock && startBlock === endBlock ? startBlock : null;
+        }
+
+        function getWholeSelectionInlineFormattingBlock(doc, range) {
+            var commonBlock = getCommonInlineFormattingBlock(range);
+            if (commonBlock && selectionCoversWholeBlockText(range, commonBlock)) return commonBlock;
+
+            var selectedText = normalizeInlineSelectionText(range && range.toString ? range.toString() : '');
+            if (!selectedText || !doc || !doc.body) return null;
+            var selector = 'p,div,h1,h2,h3,h4,h5,h6,li,td,th,blockquote';
+            var matches = Array.from(doc.body.querySelectorAll(selector)).filter(function (block) {
+                return normalizeInlineSelectionText(block.textContent || '') === selectedText;
+            });
+            matches = matches.filter(function (block) {
+                return !matches.some(function (other) {
+                    return other !== block && block.contains(other);
+                });
+            });
+            return matches.length === 1 ? matches[0] : null;
+        }
+
+        function isEmptyTextParagraph(node) {
+            if (!node || node.nodeType !== 1 || node.tagName !== 'P') return false;
+            if (!node.classList ||
+                (!node.classList.contains('text_obisnuit') && !node.classList.contains('text_obisnuit2'))) {
+                return false;
+            }
+            var clone = node.cloneNode(true);
+            clone.querySelectorAll('br').forEach(function (br) { br.remove(); });
+            return !normalizeInlineSelectionText(clone.textContent || '');
+        }
+
+        function adjacentElementAcrossWhitespace(node, direction) {
+            var sibling = node ? node[direction] : null;
+            while (sibling && sibling.nodeType === Node.TEXT_NODE &&
+                !normalizeInlineSelectionText(sibling.nodeValue || '')) {
+                sibling = sibling[direction];
+            }
+            return sibling && sibling.nodeType === Node.ELEMENT_NODE ? sibling : null;
+        }
+
+        function removeAdjacentEmptyTextParagraphs(block) {
+            if (!block || !block.parentNode) return;
+            var sibling = adjacentElementAcrossWhitespace(block, 'previousSibling');
+            while (isEmptyTextParagraph(sibling)) {
+                var previous = adjacentElementAcrossWhitespace(sibling, 'previousSibling');
+                sibling.remove();
+                sibling = previous;
+            }
+            sibling = adjacentElementAcrossWhitespace(block, 'nextSibling');
+            while (isEmptyTextParagraph(sibling)) {
+                var next = adjacentElementAcrossWhitespace(sibling, 'nextSibling');
+                sibling.remove();
+                sibling = next;
+            }
+        }
+
         function selectedBlockTextNodesHaveFormat(doc, range, tagName) {
+            if (range && range.commonAncestorContainer &&
+                range.commonAncestorContainer.nodeType === Node.TEXT_NODE) {
+                var rootText = range.commonAncestorContainer.nodeValue || '';
+                if (!rootText.trim()) return false;
+                return !!closestInlineFormatElement(range.commonAncestorContainer.parentElement, tagName);
+            }
             var walker = doc.createTreeWalker(range.commonAncestorContainer, NodeFilter.SHOW_TEXT, {
                 acceptNode: function (node) {
                     if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
@@ -8478,18 +9238,76 @@ if (isset($_GET['action'])) {
             while ((node = walker.nextNode())) {
                 found = true;
                 var parent = node.parentElement;
-                if (!parent || !parent.closest || !parent.closest(tagName)) return false;
+                if (!closestInlineFormatElement(parent, tagName)) return false;
             }
             return found;
         }
 
+        function getInlineFormatTagName(kind) {
+            if (kind === 'bold') return 'strong';
+            if (kind === 'underline') return 'u';
+            return 'em';
+        }
+
+        function inlineFormatSelector(tagName) {
+            return tagName === 'em' ? 'em,i:not([class])' : tagName;
+        }
+
+        function closestInlineFormatElement(node, tagName) {
+            var selector = inlineFormatSelector(tagName);
+            var el = node && node.nodeType === 1 ? node : (node ? node.parentElement : null);
+            while (el && el.nodeType === 1 && el.tagName !== 'BODY') {
+                if (el.matches && el.matches(selector)) return el;
+                el = el.parentElement;
+            }
+            return null;
+        }
+
+        function queryInlineFormatElements(root, tagName) {
+            if (!root || !root.querySelectorAll) return [];
+            return Array.from(root.querySelectorAll(inlineFormatSelector(tagName)));
+        }
+
         function unwrapFormatInBlock(block, tagName) {
-            Array.from(block.querySelectorAll(tagName)).forEach(function (fmt) {
+            queryInlineFormatElements(block, tagName).forEach(function (fmt) {
                 var parent = fmt.parentNode;
                 while (fmt.firstChild) parent.insertBefore(fmt.firstChild, fmt);
                 parent.removeChild(fmt);
             });
             block.normalize();
+        }
+
+        function allBlockTextNodesHaveFormat(doc, block, tagName) {
+            var walker = doc.createTreeWalker(block, NodeFilter.SHOW_TEXT, null);
+            var found = false;
+            var node;
+            while ((node = walker.nextNode())) {
+                if (!normalizeInlineSelectionText(node.nodeValue || '')) continue;
+                found = true;
+                var format = closestInlineFormatElement(node.parentElement, tagName);
+                if (!format || !block.contains(format)) return false;
+            }
+            return found;
+        }
+
+        function toggleWholeBlockInlineFormat(doc, sel, block, tagName) {
+            var removeFormat = allBlockTextNodesHaveFormat(doc, block, tagName);
+
+            // A full-paragraph command always starts from one clean representation.
+            // Thus a partial inner <u>/<em> cannot survive inside the new outer tag.
+            unwrapFormatInBlock(block, tagName);
+            if (!removeFormat) {
+                var wrapper = doc.createElement(tagName);
+                while (block.firstChild) wrapper.appendChild(block.firstChild);
+                block.appendChild(wrapper);
+            }
+
+            removeAdjacentEmptyTextParagraphs(block);
+            sel.removeAllRanges();
+            var newRange = doc.createRange();
+            newRange.selectNodeContents(block);
+            sel.addRange(newRange);
+            rememberDesignSelectionRange(doc.defaultView, doc);
         }
 
         function wrapRangeContentsWithTag(doc, range, tagName) {
@@ -8548,7 +9366,7 @@ if (isset($_GET['action'])) {
         function toggleInlineFormat(kind) {
             // Push the current body state BEFORE the change so undo can revert it
             designPushCurrentState();
-            const tagName = kind === 'bold' ? 'strong' : 'em';
+            const tagName = getInlineFormatTagName(kind);
             const info = getDesignSelectionRange();
             if (info && !info.range.collapsed) {
                 const { doc, sel, range } = info;
@@ -8557,12 +9375,62 @@ if (isset($_GET['action'])) {
                     lastDesignSnapshot = getDesignBodyHtml();
                     return;
                 }
+                const wholeSelectionBlock = getWholeSelectionInlineFormattingBlock(doc, range);
+                if (wholeSelectionBlock) {
+                    toggleWholeBlockInlineFormat(doc, sel, wholeSelectionBlock, tagName);
+                    syncFromDesign();
+                    lastDesignSnapshot = getDesignBodyHtml();
+                    return;
+                }
+                const selectedBlocks = getSelectedTextBlocks(doc, range);
+                if (selectedBlocks.length === 1) {
+                    const block = selectedBlocks[0];
+                    const blockRange = makeRangeInsideBlock(doc, range, block);
+                    if (rangeHasText(blockRange)) {
+                        if (selectionCoversWholeBlockText(blockRange, block)) {
+                            toggleWholeBlockInlineFormat(doc, sel, block, tagName);
+                            syncFromDesign();
+                            lastDesignSnapshot = getDesignBodyHtml();
+                            return;
+                        }
+                        const selectedTextInBlock = blockRange.toString();
+                        if (selectedBlockTextNodesHaveFormat(doc, blockRange, tagName)) {
+                            const fmt = closestInlineFormatElement(blockRange.startContainer, tagName);
+                            const endFmt = closestInlineFormatElement(blockRange.endContainer, tagName);
+                            if (fmt && fmt === endFmt && fmt !== block) {
+                                const parent = fmt.parentNode;
+                                while (fmt.firstChild) parent.insertBefore(fmt.firstChild, fmt);
+                                parent.removeChild(fmt);
+                                parent.normalize();
+                                if (selectedTextInBlock) {
+                                    const newRange = findTextRangeInNode(doc, parent, selectedTextInBlock);
+                                    if (newRange) { sel.removeAllRanges(); sel.addRange(newRange); }
+                                }
+                            } else {
+                                unwrapFormatInBlock(block, tagName);
+                                if (selectedTextInBlock) {
+                                    const newRange = findTextRangeInNode(doc, block, selectedTextInBlock);
+                                    if (newRange) { sel.removeAllRanges(); sel.addRange(newRange); }
+                                }
+                            }
+                        } else {
+                            const wrapper = wrapRangeContentsWithTag(doc, blockRange, tagName);
+                            sel.removeAllRanges();
+                            const newRange = doc.createRange();
+                            newRange.selectNodeContents(wrapper);
+                            sel.addRange(newRange);
+                        }
+                        syncFromDesign();
+                        lastDesignSnapshot = getDesignBodyHtml();
+                        return;
+                    }
+                }
                 // Save selected text for re-selection
                 const selectedText = range.toString();
                 let node = range.commonAncestorContainer;
                 if (node.nodeType === 3) node = node.parentElement;
-                let fmt = node && node.closest ? node.closest(tagName) : null;
-                if (fmt && fmt.tagName.toLowerCase() === tagName) {
+                let fmt = closestInlineFormatElement(node, tagName);
+                if (fmt) {
                     // Remove formatting: unwrap the tag but keep selection on original text
                     const parent = fmt.parentNode;
                     // Collect child nodes before unwrapping
@@ -8599,7 +9467,7 @@ if (isset($_GET['action'])) {
                 const el = getDesignSelection();
                 if (!el) return;
                 const doc = el.ownerDocument;
-                const existing = el.querySelector(tagName);
+                const existing = queryInlineFormatElements(el, tagName)[0];
                 if (existing) {
                     const parent = existing.parentNode;
                     while (existing.firstChild) parent.insertBefore(existing.firstChild, existing);
@@ -8611,7 +9479,6 @@ if (isset($_GET['action'])) {
                 }
             }
             syncFromDesign();
-            applyCodeToDesignPanel();
             // Record the post-change state so the next snapshot won't double-push
             lastDesignSnapshot = getDesignBodyHtml();
         }
@@ -8723,29 +9590,12 @@ if (isset($_GET['action'])) {
                     }
                     syncFromDesign();
                     lastDesignSnapshot = getDesignBodyHtml();
-                    // Force design panel refresh so CSS changes are visible immediately
-                    applyCodeToDesignPanel();
-                    // Re-select the paragraph in design so user can toggle B again
-                    setTimeout(() => {
-                        try {
-                            const iframe = document.getElementById('preview');
-                            const iDoc = iframe.contentDocument;
-                            const iWin = iframe.contentWindow;
-                            if (!iDoc || !iWin) return;
-                            // Find the same paragraph by matching text content
-                            const allBlocks = iDoc.querySelectorAll('p, div, h1, h2, h3, h4, h5, h6, li, td, th, blockquote');
-                            for (const block of allBlocks) {
-                                if (block.textContent.trim() === selectedText.trim()) {
-                                    const r = iDoc.createRange();
-                                    r.selectNodeContents(block);
-                                    const s = iWin.getSelection();
-                                    s.removeAllRanges();
-                                    s.addRange(r);
-                                    break;
-                                }
-                            }
-                        } catch (e) {}
-                    }, 50);
+                    // CSS applies immediately to the live DOM; keep the body and selection intact.
+                    const newRange = doc.createRange();
+                    newRange.selectNodeContents(targetBlock);
+                    sel.removeAllRanges();
+                    sel.addRange(newRange);
+                    rememberDesignSelectionRange(doc.defaultView, doc);
                     return;
                 }
 
@@ -8806,7 +9656,7 @@ if (isset($_GET['action'])) {
                         });
                         syncFromDesign();
                         lastDesignSnapshot = getDesignBodyHtml();
-                        applyCodeToDesignPanel();
+                        rememberDesignSelectionRange(doc.defaultView, doc);
                         return;
                     }
                     // Partial selection within a single block → wrap only the selected words.
@@ -9073,35 +9923,19 @@ if (isset($_GET['action'])) {
             if (typeof flushPendingDesignSync === 'function') flushPendingDesignSync();
             saveCurrentTabState();
             var hasUnsaved = tabs.some(function (t) { return t.isDirty; }) || isDirty;
+            // Force an immediate backup for this window only (bypass debounce).
+            try {
+                var dirtyTabs = [];
+                for (var i = 0; i < tabs.length; i++) {
+                    if (tabs[i].isDirty && tabs[i].type !== 'browser') {
+                        dirtyTabs.push(makeTabBackup(tabs[i]));
+                    }
+                }
+                replaceOwnedBackups(dirtyTabs);
+            } catch (ex) { }
             if (hasUnsaved) {
-                // Force immediate backup (bypass debounce)
-                try {
-                    var dirtyTabs = [];
-                    for (var i = 0; i < tabs.length; i++) {
-                        if (tabs[i].isDirty) {
-                            dirtyTabs.push({
-                                id: tabs[i].id,
-                                filePath: tabs[i].filePath,
-                                fileName: tabs[i].fileName,
-                                tabLabel: tabs[i].tabLabel,
-                                fullTitle: tabs[i].fullTitle,
-                                editorContent: tabs[i].editorContent,
-                                originalContent: tabs[i].originalContent,
-                                cursorPos: tabs[i].cursorPos,
-                                scrollInfo: tabs[i].scrollInfo,
-                                viewMode: tabs[i].viewMode
-                            });
-                        }
-                    }
-                    if (dirtyTabs.length > 0) {
-                        localStorage.setItem('htmlEditorBackupTabs', JSON.stringify(dirtyTabs));
-                    }
-                } catch (ex) { }
                 e.preventDefault();
                 e.returnValue = '';
-            } else {
-                // No dirty tabs — remove any stale backup from localStorage
-                try { localStorage.removeItem('htmlEditorBackupTabs'); } catch (ex) { }
             }
         });
 
@@ -9286,21 +10120,39 @@ if (isset($_GET['action'])) {
             document.getElementById('propFont').addEventListener('change', () => applyFontProperty('fontFamily', document.getElementById('propFont').value));
             document.getElementById('propClass').addEventListener('change', () => applyClassProperty(document.getElementById('propClass').value));
             document.getElementById('propSize').addEventListener('change', () => applyFontProperty('fontSize', document.getElementById('propSize').value));
+            document.getElementById('propBold').addEventListener('mousedown', e => e.preventDefault());
             document.getElementById('propBold').addEventListener('click', () => {
                 toggleInlineFormat('bold');
             });
+            document.getElementById('propItalic').addEventListener('mousedown', e => e.preventDefault());
             document.getElementById('propItalic').addEventListener('click', () => {
                 toggleInlineFormat('italic');
             });
+            const propUnderline = document.getElementById('propUnderline');
+            if (propUnderline) {
+                propUnderline.addEventListener('mousedown', e => e.preventDefault());
+                propUnderline.addEventListener('click', () => {
+                    toggleInlineFormat('underline');
+                });
+            }
             const quickItalicTop = document.getElementById('btnQuickItalic');
             if (quickItalicTop) {
+                quickItalicTop.addEventListener('mousedown', e => e.preventDefault());
                 quickItalicTop.addEventListener('click', () => {
                     toggleInlineFormat('italic');
+                });
+            }
+            const quickUnderlineTop = document.getElementById('btnQuickUnderline');
+            if (quickUnderlineTop) {
+                quickUnderlineTop.addEventListener('mousedown', e => e.preventDefault());
+                quickUnderlineTop.addEventListener('click', () => {
+                    toggleInlineFormat('underline');
                 });
             }
             // Shortcut în topbar: B lângă Redo → aplică clasa text_obisnuit2 pe selecția din Design
             const quickClassBtn = document.getElementById('btnClassObisnuit2');
             if (quickClassBtn) {
+                quickClassBtn.addEventListener('mousedown', e => e.preventDefault());
                 quickClassBtn.addEventListener('click', () => {
                     const targetClass = quickClassBtn.dataset.className || 'text_obisnuit2';
                     applyClassProperty(targetClass);

@@ -962,12 +962,59 @@ if (isset($_GET['action'])) {
         exit;
     }
 
+    if ($action === 'generateRSS') {
+        @set_time_limit(600); ini_set('display_errors', '0');
+        $dir = 'E:/Carte/BB/17 - Site Leadership/alte/Ionel Balauta/Aryeht/Task 1 - Traduce tot site-ul/Doar Google Web/Andreea/Meditatii/Sedinta 13';
+        $logs = [];
+        foreach (['EN', 'RO'] as $lang) {
+            $err = tempnam(sys_get_temp_dir(), 'rss');
+            $process = proc_open(['C:/Users/necul/AppData/Local/Programs/Python/Python312/python.exe', '-X', 'utf8', $dir . '/rss XML 2024 ' . $lang . '.py'], [0=>['pipe','r'],1=>['pipe','w'],2=>['file',$err,'a']], $pipes, $dir, null, ['bypass_shell'=>true]);
+            if (!is_resource($process)) { echo json_encode(['ok'=>false,'error'=>'Nu pot porni RSS ' . $lang]); exit; }
+            fclose($pipes[0]); $logs[] = stream_get_contents($pipes[1]); fclose($pipes[1]); $code = proc_close($process);
+            $errors = file_get_contents($err); @unlink($err);
+            if ($code !== 0) { echo json_encode(['ok'=>false,'error'=>implode("\n",$logs) . $errors]); exit; }
+        }
+        echo json_encode(['ok'=>true,'log'=>implode("\n",$logs)], JSON_UNESCAPED_UNICODE); exit;
+    }
+    if ($action === 'categoryPairSync') {
+        ini_set('display_errors', '0');
+        @set_time_limit(600);
+        $reportPath = __DIR__ . '/category-sync-report.json';
+        if (isset($_GET['report'])) {
+            echo is_file($reportPath) ? file_get_contents($reportPath) : json_encode(['ok' => true, 'changes' => [], 'issues' => []]);
+            exit;
+        }
+        $python = 'C:/Users/necul/AppData/Local/Programs/Python/Python312/python.exe';
+        $exclude = $_POST['exclude'] ?? '[]';
+        $errorFile = tempnam(sys_get_temp_dir(), 'catsync');
+        $proc = proc_open([$python, __DIR__ . '/sync_ro_en_categories.py', '--exclude', $exclude],
+            [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', $errorFile, 'a']], $pipes, __DIR__, null, ['bypass_shell' => true]);
+        if (!is_resource($proc)) { echo json_encode(['ok' => false, 'error' => 'Nu pot porni verificarea RO–EN']); exit; }
+        fclose($pipes[0]); $output = stream_get_contents($pipes[1]); fclose($pipes[1]);
+        $code = proc_close($proc); $errors = file_get_contents($errorFile); @unlink($errorFile);
+        $data = json_decode($output, true);
+        echo json_encode(is_array($data) ? $data : ['ok' => false, 'error' => 'Verificarea RO–EN a eșuat: ' . $errors], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
     // Butonul „Translate”: ruleaza „TRADUCE TOT - automat.py”, care gaseste articolele din ro/ netraduse in en/,
     // le traduce si le duce prin Pasul 0-5 pana in c:\Folder1\fisiere_html.
     //   translateSiteCheck  (GET)  -> lista articolelor netraduse (nu modifica nimic)
     //   translateSiteStart  (POST) -> porneste scriptul in fundal; scrie in jurnalul de mai jos
     //   translateSiteStatus (GET)  -> continutul jurnalului + daca s-a terminat
     if (in_array($action, ['translateSiteCheck', 'translateSiteStart', 'translateSiteStatus'], true)) {
+        // Keep PHP diagnostics out of the JSON response; preserve them in the server log.
+        ini_set('display_errors', '0');
+        $translateBufferLevel = ob_get_level();
+        ob_start();
+        register_shutdown_function(function () use ($translateBufferLevel) {
+            $error = error_get_last();
+            if ($error && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+                while (ob_get_level() > $translateBufferLevel) ob_end_clean();
+                http_response_code(500);
+                echo json_encode(['ok' => false, 'error' => 'Verificarea a fost întreruptă de server: ' . $error['message']], JSON_UNESCAPED_UNICODE);
+            }
+        });
         $ttDir = 'e:/Carte/BB/17 - Site Leadership/alte/Ionel Balauta/Aryeht/Task 1 - Traduce tot site-ul/Doar Google Web/Andreea/Meditatii/2023/Iulia Python';
         $ttScript = $ttDir . '/TRADUCE TOT - automat.py';
         $ttBat = $ttDir . '/TRADUCE TOT - din editor.bat';
@@ -992,24 +1039,14 @@ if (isset($_GET['action'])) {
 
         if ($action === 'translateSiteCheck') {
             @set_time_limit(120);
-            $env = getenv(); if (!is_array($env)) $env = [];
-            $env['PYTHONIOENCODING'] = 'utf-8'; $env['PYTHONUTF8'] = '1';
-            $proc = proc_open([$python, '-u', 'TRADUCE TOT - automat.py', '--doar-lista'],
-                [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
-                $pipes, $ttDir, $env, ['bypass_shell' => true]);
-            if (!is_resource($proc)) {
-                echo json_encode(['ok' => false, 'error' => 'Nu am putut porni Python (' . $python . ').'], JSON_UNESCAPED_UNICODE);
-                exit;
+            try {
+                require_once __DIR__ . '/translation-cache.php';
+                $result = translation_cache_step(max(0, (int) ($_GET['cursor'] ?? 0)));
+                $result['running'] = $isRunning();
+                echo json_encode($result, JSON_UNESCAPED_UNICODE);
+            } catch (Throwable $e) {
+                echo json_encode(['ok' => false, 'error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
             }
-            fclose($pipes[0]);
-            $out = stream_get_contents($pipes[1]); $err = stream_get_contents($pipes[2]);
-            fclose($pipes[1]); fclose($pipes[2]); proc_close($proc);
-            $j = json_decode(trim(substr($out, (int) strpos($out, '{'))), true);
-            if (!is_array($j) || !isset($j['netraduse'])) {
-                echo json_encode(['ok' => false, 'error' => "Scriptul nu a raspuns cum trebuie.\n" . $out . $err], JSON_UNESCAPED_UNICODE);
-                exit;
-            }
-            echo json_encode(['ok' => true, 'files' => $j['netraduse'], 'running' => $isRunning()], JSON_UNESCAPED_UNICODE);
             exit;
         }
 
@@ -2624,6 +2661,7 @@ if (isset($_GET['action'])) {
                 <button class="btn" id="btnSendArticleEmail" onclick="sendLatestArticleEmail()"
                     title="Trimite pe email ultimul articol din ro/index.html (ruleaza monitor_index.py in fundal)"
                     style="background:#16a34a;color:#fff;border-color:#15803d"><i class="fas fa-envelope"></i> Trimite E-mail</button>
+                <button class="btn" style="background:#ea580c;color:white" onclick="generateRssFeeds(this)"><i class="fas fa-rss"></i> RSS</button>
                 <button class="btn" id="btnTranslateSite" onclick="translateUntranslatedArticles()"
                     title="Gaseste articolele din ro/ netraduse in en/, le traduce si le duce in c:\Folder1\fisiere_html (TRADUCE TOT - automat.py)"
                     style="background:#0891b2;color:#fff;border-color:#0e7490"><i class="fas fa-language"></i> Translate</button>
@@ -6204,13 +6242,18 @@ if (isset($_GET['action'])) {
         }
 
         // Verificare completă: toate grupurile de articole cu aceeași dată, pe fiecare limbă
+        let dateDupFullBusy = false;
+        let dateDupLastAutomaticSignature = null;
         async function runFullDateDuplicateCheck(manual) {
+            if (dateDupFullBusy) return;
+            dateDupFullBusy = true;
+            try {
             const sections = [];
             for (const dir of dateDupDirs()) {
                 let data;
                 try { data = await dateDupFetchDir(dir); } catch (e) { continue; }
                 const byKey = new Map();
-                data.items.filter(a => a.listed).forEach(a => {
+                data.items.filter(a => a.listed || a.cat).forEach(a => {
                     if (!byKey.has(a.key)) byKey.set(a.key, []);
                     byKey.get(a.key).push(a);
                 });
@@ -6232,9 +6275,13 @@ if (isset($_GET['action'])) {
             // Automat (la pornire): lista mare apare doar dacă nu e deschis niciun HTML.
             // Cu un fișier deschis, apare doar fereastra mică, după ce îi schimbi data.
             if (!manual && tabs.some(t => t.filePath && t.type !== 'browser')) return;
+            const signature = JSON.stringify(sections);
+            if (!manual && signature === dateDupLastAutomaticSignature) return;
+            dateDupLastAutomaticSignature = signature;
             if (sections.length) showDateDuplicatesDialog(sections, null);
             else if (manual) { closeDateDuplicatesDialog('all'); toast('Nicio dată duplicată în articolele din ro/ și en/.'); }
             else closeDateDuplicatesDialog('all');
+            } finally { dateDupFullBusy = false; }
         }
 
         // Verificarea articolului deschis (data din editor, chiar nesalvată)
@@ -6254,9 +6301,9 @@ if (isset($_GET['action'])) {
             // Articol nou (încă în nicio categorie, de obicei copiat dintr-unul vechi): la deschidere
             // nu verificăm — data o schimbi oricum la final; verificarea vine după ce schimbi data.
             const meListed = data.items.some(a => a.listed && dateDupNormPath(a.file) === me);
-            if (silent && !meListed && !force) return;
+            // New copies must be checked even before they are listed in a category.
             // celelalte articole (doar cele din categorii); fișierul deschis e verificat oricum
-            const others = data.items.filter(a => a.listed && dateDupNormPath(a.file) !== me);
+            const others = data.items.filter(a => (a.listed || a.cat) && dateDupNormPath(a.file) !== me);
             const same = others.filter(a => a.key === cur.key);
             if (!same.length) {
                 closeDateDuplicatesDialog('file');
@@ -6711,6 +6758,16 @@ if (isset($_GET['action'])) {
 
         // La pornire: verificare completă imediat (scanarea vine din cache, durează ~1 s)
         setTimeout(() => { runFullDateDuplicateCheck(false).catch(() => { }); }, 0);
+
+        // Discover files copied into RO/EN while the start screen stays open.
+        setInterval(() => {
+            if (!document.hidden && !tabs.some(t => t.filePath && t.type !== 'browser')) {
+                runFullDateDuplicateCheck(false).catch(console.error);
+            }
+        }, 30000);
+        window.addEventListener('focus', () => {
+            if (!tabs.some(t => t.filePath && t.type !== 'browser')) runFullDateDuplicateCheck(false).catch(console.error);
+        });
 
         function showIndexOrderReport(reports) {
             let dialog = document.getElementById('indexOrderReport');
@@ -11036,15 +11093,158 @@ if (isset($_GET['action'])) {
             };
             tick();
         }
+        let categoryPairSyncPromise = null;
+        async function generateRssFeeds(button) {
+            button.disabled = true;
+            showEmailConsole('RSS — se generează…', 'Generez fluxurile EN și RO în Principal 2022…', '#facc15');
+            try {
+                const r = await (await fetch('?action=generateRSS', {method:'POST'})).json();
+                showEmailConsole(r.ok ? 'RSS — gata' : 'RSS — eroare', r.log || r.error, r.ok ? '#4ade80' : '#f87171');
+            } catch (e) { showEmailConsole('RSS — eroare', e.message, '#f87171'); }
+            finally { button.disabled = false; }
+        }
+        function presentCategoryPairReport(result) {
+            const changes = result.changes || [], issues = result.issues || [];
+            if (!changes.length && !issues.length) {
+                localStorage.removeItem('categoryPairLastReport');
+                const oldReport = document.getElementById('categoryPairReport');
+                if (oldReport) oldReport.remove();
+                return;
+            }
+            const signature = JSON.stringify(['clear-flags-v2', changes, issues]);
+            if (localStorage.getItem('categoryPairLastReport') === signature) return;
+            localStorage.setItem('categoryPairLastReport', signature);
+            let dialog = document.getElementById('categoryPairReport');
+            if (dialog) dialog.remove();
+            dialog = document.createElement('dialog'); dialog.id = 'categoryPairReport';
+            dialog.style.cssText = 'max-width:820px;width:90%;max-height:80vh;overflow:auto;background:#202532;color:#fff;border:1px solid #536480;border-radius:14px;padding:24px;font:15px/1.6 system-ui';
+            const title = document.createElement('h2'); title.textContent = 'Verificare categorii și corespondențe RO–EN'; dialog.appendChild(title);
+            for (const change of changes) {
+                const p = document.createElement('p'); p.textContent = 'Actualizat: ' + change.file + ' — adăugate: ' + change.articles.join(', '); dialog.appendChild(p);
+            }
+            const corrections = new Map();
+            for (const issue of issues) {
+                const m = issue.match(/^FLAGS (RO|EN) diferite: (ro|en)\/([^ ]+) → ([^;]+); (ro|en)\/([^ ]+) → (.+)$/);
+                if (!m) continue;
+                const lang = m[1].toLowerCase();
+                const pair = { [m[2]]: m[3], [m[5]]: m[6] };
+                if (!pair.ro || !pair.en) continue;
+                for (const side of [{folder:m[2],file:m[3],value:m[4]}, {folder:m[5],file:m[6],value:m[7]}]) {
+                    if (side.value === pair[lang]) continue;
+                    const key = side.folder + '/' + side.file + ':' + lang;
+                    corrections.set(key, {lang, pair, path: side.folder + '/' + side.file, wrong: side.value, correct: pair[lang]});
+                }
+            }
+            const displayed = [...corrections.values()];
+            for (const correction of displayed) {
+                const card = document.createElement('div');
+                card.style.cssText = 'margin:14px 0;padding:16px;border:1px solid #475569;border-radius:10px;background:#151c29;overflow-wrap:anywhere';
+                const pair = document.createElement('p');
+                pair.style.cssText = 'margin:0 0 8px;color:#93c5fd';
+                pair.textContent = 'Pereche: ro/' + correction.pair.ro + ' ↔ en/' + correction.pair.en;
+                const instruction = document.createElement('p'); instruction.style.margin = '0 0 8px';
+                instruction.textContent = 'În fișierul ' + correction.path + ', schimbă linkul steagului ' + correction.lang.toUpperCase() + ':';
+                const wrong = document.createElement('strong'); wrong.style.color = '#fca5a5'; wrong.textContent = correction.wrong;
+                const right = document.createElement('strong'); right.style.color = '#86efac'; right.textContent = correction.correct;
+                card.append(pair, instruction, wrong, document.createTextNode(' → '), right);
+                dialog.appendChild(card);
+            }
+            for (const issue of issues) {
+                // Hide redundant explanations already covered by an explicit replacement.
+                const covered = displayed.some(c => issue.includes(c.path) && issue.includes(c.wrong));
+                if (covered) continue;
+                const p = document.createElement('p'); p.textContent = issue; p.style.color = '#fcd18b'; dialog.appendChild(p);
+            }
+            const button = document.createElement('button'); button.textContent = 'Am înțeles'; button.onclick = () => { dialog.close(); dialog.remove(); }; dialog.appendChild(button);
+            button.style.cssText = 'padding:12px 28px;margin-top:16px;border:1px solid #6aa8ff;border-radius:10px;background:linear-gradient(135deg,#2563eb,#4f46e5);color:white;font:600 17px system-ui;cursor:pointer;box-shadow:0 4px 12px #0005';
+            title.style.cssText = 'cursor:move;touch-action:none;user-select:none;margin-top:0;padding:8px 0';
+            title.onpointerdown = event => {
+                if (event.button !== 0) return;
+                const rect = dialog.getBoundingClientRect(), x = event.clientX, y = event.clientY;
+                dialog.style.margin = '0'; dialog.style.position = 'fixed'; dialog.style.left = rect.left + 'px'; dialog.style.top = rect.top + 'px';
+                title.setPointerCapture(event.pointerId);
+                title.onpointermove = e => { dialog.style.left = Math.max(0, Math.min(innerWidth - 80, rect.left + e.clientX - x)) + 'px'; dialog.style.top = Math.max(0, Math.min(innerHeight - 50, rect.top + e.clientY - y)) + 'px'; };
+                title.onpointerup = title.onpointercancel = () => { title.onpointermove = null; };
+            };
+            document.body.appendChild(dialog); dialog.showModal();
+        }
+        async function syncCategoryPairs() {
+            if (categoryPairSyncPromise) return categoryPairSyncPromise;
+            categoryPairSyncPromise = (async () => {
+                const exclude = tabs.filter(t => t.isDirty || (t.id === activeTabId && editor && normalizeHtmlForSyncCompare(editor.getValue()) !== normalizeHtmlForSyncCompare(t.originalContent))).map(t => t.filePath).filter(Boolean);
+                let result;
+                do {
+                    result = await (await fetch('?action=categoryPairSync', { method: 'POST', body: new URLSearchParams({ exclude: JSON.stringify(exclude) }) })).json();
+                    if (result.busy) await new Promise(resolve => setTimeout(resolve, 2000));
+                } while (result.busy);
+                if (!result.ok) throw new Error(result.error || 'Verificarea RO–EN a eșuat');
+                presentCategoryPairReport(result);
+                for (const change of result.changes || []) {
+                    const tab = findTabByPath(change.file);
+                    if (!tab || tab.isDirty) continue;
+                    if (tab.id === activeTabId && editor && normalizeHtmlForSyncCompare(editor.getValue()) !== normalizeHtmlForSyncCompare(tab.originalContent)) continue;
+                    const fresh = await (await fetch('?action=load&file=' + encodeURIComponent(change.file), { cache: 'no-store' })).json();
+                    if (fresh.ok && !tab.isDirty) {
+                        tab.editorContent = tab.originalContent = fresh.content;
+                        tab.originalContentNorm = normalizeHtmlForCompare(fresh.content);
+                        if (tab.id === activeTabId && editor) { isSyncFromDesign = true; try { editor.setValue(fresh.content); } finally { isSyncFromDesign = false; } updatePreview(); }
+                    }
+                }
+                return result;
+            })();
+            try { return await categoryPairSyncPromise; } finally { categoryPairSyncPromise = null; }
+        }
+        window.addEventListener('load', () => {
+            fetch('?action=categoryPairSync&report=1', { cache: 'no-store' }).then(r => r.json()).then(presentCategoryPairReport).catch(console.error);
+            syncCategoryPairs().catch(e => showEmailConsole('Sincronizare RO–EN — eroare', e.message, '#f87171'));
+        });
+        function checkIdleCategoryPairs() {
+            if (tabs.some(t => t.type !== 'browser' && (t.filePath || t.fileName))) return;
+            if (categoryPairSyncPromise || _translatePollTimer) return;
+            syncCategoryPairs().catch(console.error);
+        }
+        setInterval(checkIdleCategoryPairs, 15000);
+        window.addEventListener('focus', checkIdleCategoryPairs);
+
         async function translateUntranslatedArticles() {
             const btn = document.getElementById('btnTranslateSite');
             if (_translatePollTimer) { showEmailConsole('Translate — rulează…', 'Se încarcă jurnalul...', '#facc15'); return; }
             if (btn && btn.disabled) return;
             if (btn) { btn.disabled = true; btn.style.opacity = '.6'; }
             const enable = function () { if (btn) { btn.disabled = false; btn.style.opacity = ''; } };
+            showEmailConsole('Translate', 'Sincronizez categoriile RO–EN înainte de traducere…', '#facc15');
+            try { await syncCategoryPairs(); } catch (e) { enable(); showEmailConsole('Translate — eroare de sincronizare', e.message, '#f87171'); return; }
             showEmailConsole('Translate', 'Caut articolele din ro/ care nu sunt traduse în en/...', '#facc15');
+            const initialPanel = document.getElementById('emailConsoleDialog');
+            if (initialPanel) {
+                const loader = document.createElement('progress');
+                loader.style.cssText = 'width:95%;height:16px;margin:12px 2.5%';
+                initialPanel.appendChild(loader);
+            }
             let info;
-            try { info = await (await fetch('?action=translateSiteCheck', { cache: 'no-store' })).json(); }
+            try {
+                let cursor = 0;
+                const started = Date.now();
+                do {
+                    const response = await fetch('?action=translateSiteCheck&cursor=' + cursor, { cache: 'no-store' });
+                    const body = await response.text();
+                    try { info = JSON.parse(body); }
+                    catch (_) { throw new Error('Serverul a trimis un răspuns invalid (HTTP ' + response.status + '). Verifică jurnalul PHP; scanarea poate fi reluată.'); }
+                    if (!info.ok) break;
+                    cursor = info.next;
+                    const percent = info.total ? Math.round(cursor * 100 / info.total) : 100;
+                    const remaining = cursor ? Math.ceil((Date.now() - started) / 1000 * (info.total - cursor) / cursor) : null;
+                    showEmailConsole('Translate — verificare ' + percent + '%',
+                        'Verificate: ' + cursor + ' / ' + info.total + '\nDeja traduse: ' + info.translated +
+                        '\nTimp rămas estimat: ' + (remaining === null ? 'se calculează…' : remaining + ' secunde'), '#facc15');
+                    const panel = document.getElementById('emailConsoleDialog');
+                    if (panel) {
+                        let bar = panel.querySelector('progress');
+                        if (!bar) { bar = document.createElement('progress'); bar.style.cssText = 'width:95%;height:16px;margin:12px 2.5%'; panel.appendChild(bar); }
+                        bar.max = info.total || 1; bar.value = cursor;
+                    }
+                } while (!info.done);
+            }
             catch (e) { enable(); showEmailConsole('Translate — eroare', 'Nu pot contacta serverul: ' + e.message, '#f87171'); return; }
             if (!info.ok) { enable(); showEmailConsole('Translate — eroare', info.error || 'Eroare necunoscută.', '#f87171'); return; }
             if (info.running) { showEmailConsole('Translate — rulează…', 'Traducerea rulează deja.', '#facc15'); pollTranslateLog(); return; }
