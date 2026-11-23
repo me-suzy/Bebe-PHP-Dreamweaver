@@ -974,7 +974,7 @@ if (isset($_GET['action'])) {
             $errors = file_get_contents($err); @unlink($err);
             if ($code !== 0) { echo json_encode(['ok'=>false,'error'=>implode("\n",$logs) . $errors]); exit; }
         }
-        echo json_encode(['ok'=>true,'log'=>implode("\n",$logs)], JSON_UNESCAPED_UNICODE); exit;
+        echo json_encode(['ok'=>true,'log'=>'RSS a fost generat în RO și în EN.'], JSON_UNESCAPED_UNICODE); exit;
     }
     if ($action === 'categoryPairSync') {
         ini_set('display_errors', '0');
@@ -1041,7 +1041,12 @@ if (isset($_GET['action'])) {
             @set_time_limit(120);
             try {
                 require_once __DIR__ . '/translation-cache.php';
-                $result = translation_cache_step(max(0, (int) ($_GET['cursor'] ?? 0)));
+                $pending = json_decode(@file_get_contents(__DIR__ . '/translation-publication.json'), true);
+                if (is_array($pending) && empty($pending['complete'])) {
+                    $result = ['ok'=>true, 'done'=>true, 'resume'=>true, 'files'=>$pending['articles'] ?? [], 'next'=>0, 'total'=>0, 'translated'=>0];
+                } else {
+                    $result = translation_cache_step(max(0, (int) ($_GET['cursor'] ?? 0)));
+                }
                 $result['running'] = $isRunning();
                 echo json_encode($result, JSON_UNESCAPED_UNICODE);
             } catch (Throwable $e) {
@@ -1073,7 +1078,7 @@ if (isset($_GET['action'])) {
             $t = $readLog();
             $done = preg_match('/\[\[SFARSIT cod=(-?\d+)\]\]/', $t, $m) === 1;
             echo json_encode(['ok' => true, 'log' => $t, 'done' => $done,
-                'success' => $done && $m[1] === '0' && strpos($t, 'GATA in') !== false,
+                'success' => $done && $m[1] === '0',
                 'running' => $isRunning()], JSON_UNESCAPED_UNICODE);
             exit;
         }
@@ -2852,9 +2857,6 @@ if (isset($_GET['action'])) {
                     <option value="20">20px</option>
                     <option value="24">24px</option>
                 </select>
-                <button type="button" class="btn btn-ghost prop-btn" id="propBold" title="Bold">B</button>
-                <button type="button" class="btn btn-ghost prop-btn" id="propItalic" title="Italic">I</button>
-                <button type="button" class="btn btn-ghost prop-btn" id="propUnderline" title="Underline">U</button>
                 <label>Text:</label><input type="color" id="propColor" value="#000000" title="Culoare text">
                 <label>Fundal:</label><input type="color" id="propBg" value="#ffffff" title="Culoare fundal">
             </div>
@@ -3144,12 +3146,50 @@ if (isset($_GET['action'])) {
             }
         }
 
+        const postponedChecks = new Map();
+        function validationGraceRemaining() {
+            const opened = tabs.filter(t => t.type !== 'browser' && (t.filePath || t.fileName));
+            return opened.length ? Math.max(0, ...opened.map(t => (t.validationOpenedAt || 0) + 120000 - Date.now())) : 0;
+        }
+        function postponeValidation(key, callback) {
+            if (!validationGraceRemaining()) return false;
+            postponedChecks.set(key, callback);
+            return true;
+        }
+        setInterval(() => {
+            if (validationGraceRemaining()) return;
+            const pending = [...postponedChecks.values()]; postponedChecks.clear();
+            pending.forEach(callback => Promise.resolve().then(callback).catch(console.error));
+        }, 1000);
         function createTabState(opts) {
             opts = opts || {};
+            if (opts.type !== 'browser') {
+                // Existing automatic notices should also leave room for the new article.
+                setTimeout(() => {
+                    if (!validationGraceRemaining()) return;
+                    for (const id of ['dateDupFileDialog', 'dateDuplicatesDialog', 'linkDuplicatesDialog', 'categoryPairReport', 'indexOrderReport']) {
+                        const notice = document.getElementById(id);
+                        if (notice) {
+                            if (id === 'categoryPairReport') {
+                                localStorage.removeItem('categoryPairLastReport');
+                                postponeValidation('category-pairs', () => syncCategoryPairs());
+                            }
+                            if (id === 'dateDuplicatesDialog' || id === 'dateDupFileDialog') {
+                                dateDupLastAutomaticSignature = '';
+                                postponeValidation('all-dates', () => runFullDateDuplicateCheck(false));
+                            }
+                            if (id === 'linkDuplicatesDialog') postponeValidation('links', () => runLinkDuplicateCheck());
+                            if (id === 'indexOrderReport') { if (notice.open) notice.close(); }
+                            else notice.remove();
+                        }
+                    }
+                }, 0);
+            }
             tabIdCounter++;
             var _oc = (opts.originalContent || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
             return {
                 id: tabIdCounter,
+                validationOpenedAt: Date.now(),
                 type: opts.type || 'file',       // 'file' or 'browser'
                 browserUrl: opts.browserUrl || null,
                 browserWindowRef: null,           // window.open() reference
@@ -6245,6 +6285,7 @@ if (isset($_GET['action'])) {
         let dateDupFullBusy = false;
         let dateDupLastAutomaticSignature = null;
         async function runFullDateDuplicateCheck(manual) {
+            if (postponeValidation('all-dates', () => runFullDateDuplicateCheck(manual))) return;
             if (dateDupFullBusy) return;
             dateDupFullBusy = true;
             try {
@@ -6274,7 +6315,7 @@ if (isset($_GET['action'])) {
             }
             // Automat (la pornire): lista mare apare doar dacă nu e deschis niciun HTML.
             // Cu un fișier deschis, apare doar fereastra mică, după ce îi schimbi data.
-            if (!manual && tabs.some(t => t.filePath && t.type !== 'browser')) return;
+            if (postponeValidation('all-dates', () => runFullDateDuplicateCheck(manual))) return;
             const signature = JSON.stringify(sections);
             if (!manual && signature === dateDupLastAutomaticSignature) return;
             dateDupLastAutomaticSignature = signature;
@@ -6289,6 +6330,7 @@ if (isset($_GET['action'])) {
         // silent: fără mesaj când data e unică (verificarea de la deschiderea fișierului)
         // force: verifică și un articol încă neadăugat în nicio categorie (folosit după Save)
         async function runCurrentDateDuplicateCheck(onlyPath, silent, force) {
+            if (postponeValidation('current-date', () => runCurrentDateDuplicateCheck(null, true, force))) return;
             if (!editor || !currentFile) return;
             if (onlyPath && dateDupNormPath(onlyPath) !== dateDupNormPath(currentFile)) return;
             const dir = dateDupDirOfFile(currentFile);
@@ -6486,6 +6528,11 @@ if (isset($_GET['action'])) {
         // opts (opțional): { id, title, recheck } — folosit și de fereastra Link-Duble
         function showDateDuplicatesDialog(sections, currentPath, opts) {
             opts = opts || {};
+            if (postponeValidation('date-dialog-' + (opts.id || currentPath || 'all'), () => {
+                if (opts.id === 'linkDuplicatesDialog') return runLinkDuplicateCheck();
+                dateDupLastAutomaticSignature = '';
+                return currentPath ? runCurrentDateDuplicateCheck(currentPath, true, true) : runFullDateDuplicateCheck(false);
+            })) return;
             const boxId = opts.id || (currentPath ? 'dateDupFileDialog' : 'dateDuplicatesDialog');
             let box = document.getElementById(boxId);
             const keepPos = box ? { left: box.style.left, top: box.style.top } : null;
@@ -6770,6 +6817,7 @@ if (isset($_GET['action'])) {
         });
 
         function showIndexOrderReport(reports) {
+            if (postponeValidation('index-order', () => showIndexOrderReport(reports))) return;
             let dialog = document.getElementById('indexOrderReport');
             if (!dialog) {
                 dialog = document.createElement('dialog');
@@ -6904,6 +6952,7 @@ if (isset($_GET['action'])) {
 
         let identityDialogQueue = Promise.resolve();
         async function checkArticleIdentity(tab, closing = false) {
+            if (postponeValidation('canonical-' + (tab && tab.id), () => checkArticleIdentity(tab))) return true;
             if (!tab || tab.type === 'browser' || !tab.filePath) return true;
             const source = tab.id === activeTabId && editor ? editor.getValue() : tab.editorContent;
             const issues = articleIdentityIssues(source || '', tab.filePath);
@@ -6935,6 +6984,7 @@ if (isset($_GET['action'])) {
                     if (!closing) setTimeout(() => checkArticleIdentity(tab), 0);
                     return false;
                 }
+                if (postponeValidation('canonical-' + tab.id, () => checkArticleIdentity(tab))) return true;
                 return new Promise(resolve => {
                     if (!document.getElementById('canonicalCheckStyle')) {
                         const st = document.createElement('style');
@@ -9390,7 +9440,7 @@ if (isset($_GET['action'])) {
             if (!sel || !sel.rangeCount) return null;
             let node = sel.getRangeAt(0).startContainer;
             if (node && node.nodeType !== 1) node = node.parentNode;
-            const p = node && node.closest ? node.closest('p') : null;
+            const p = node && node.closest ? node.closest('p,h1,h2,h3,h4,h5,h6') : null;
             return p && p.ownerDocument.body && p.ownerDocument.body.contains(p) ? p : null;
         }
 
@@ -9445,6 +9495,11 @@ if (isset($_GET['action'])) {
 
         function setDesignParagraphStyle(p, cls) {
             designPushCurrentState();
+            if (p.tagName !== 'P') {
+                const paragraph = p.ownerDocument.createElement('p');
+                while (p.firstChild) paragraph.appendChild(p.firstChild);
+                p.replaceWith(paragraph); p = paragraph;
+            }
             Array.prototype.slice.call(p.attributes).forEach(function (a) {
                 if (a.name !== 'class') p.removeAttribute(a.name);
             });
@@ -9471,7 +9526,7 @@ if (isset($_GET['action'])) {
         function toggleBoldParagraphStyle() {
             const p = getDesignCaretParagraph();
             if (!p || !designSelectionIsWholeParagraph(p)) return false;
-            const isBold = p.classList.contains('text_obisnuit2');
+            const isBold = p.tagName === 'P' && p.classList.contains('text_obisnuit2');
             setDesignParagraphStyle(p, isBold ? 'text_obisnuit' : 'text_obisnuit2');
             return true;
         }
@@ -11078,7 +11133,7 @@ if (isset($_GET['action'])) {
                 if (r.done) {
                     _translatePollTimer = null;
                     if (btn) { btn.disabled = false; btn.style.opacity = ''; }
-                    showEmailConsole(r.success ? 'Translate — gata ✓ (fișierele sunt în c:\\Folder1\\fisiere_html)' : 'Translate — oprit ✗',
+                    showEmailConsole(r.success ? 'Translate — gata ✓ (design nou + publicat în ro/en și pe FTP)' : 'Translate — oprit ✗',
                         text + '\n>>>', r.success ? '#38bdf8' : '#f87171');
                 } else {
                     if (visible) {
@@ -11104,6 +11159,7 @@ if (isset($_GET['action'])) {
             finally { button.disabled = false; }
         }
         function presentCategoryPairReport(result) {
+            if (postponeValidation('category-pairs', () => syncCategoryPairs())) return;
             const changes = result.changes || [], issues = result.issues || [];
             if (!changes.length && !issues.length) {
                 localStorage.removeItem('categoryPairLastReport');
@@ -11255,7 +11311,7 @@ if (isset($_GET['action'])) {
             }
             const dlg0 = document.getElementById('emailConsoleDialog');
             if (dlg0) dlg0.style.display = 'none';
-            if (!await confirmTranslateDialog(info.files)) { enable(); return; }
+            if (!info.resume && !await confirmTranslateDialog(info.files)) { enable(); return; }
             let r;
             try {
                 r = await (await fetch('?action=translateSiteStart', { method: 'POST', body: new URLSearchParams({}) })).json();
@@ -11979,13 +12035,13 @@ if (isset($_GET['action'])) {
                 isItalicNow = selState.italic;
                 isUnderNow = selState.underline;
             }
-            boldBtn.style.background = isBoldNow ? 'rgba(59,130,246,0.3)' : '';
-            italicBtn.style.background = isItalicNow ? 'rgba(59,130,246,0.3)' : '';
+            if (boldBtn) boldBtn.style.background = isBoldNow ? 'rgba(59,130,246,0.3)' : '';
+            if (italicBtn) italicBtn.style.background = isItalicNow ? 'rgba(59,130,246,0.3)' : '';
             if (underlineBtn) underlineBtn.style.background = isUnderNow ? 'rgba(59,130,246,0.3)' : '';
             const quickItalicBtn = document.getElementById('btnQuickItalic');
-            if (quickItalicBtn) quickItalicBtn.style.background = italicBtn.style.background;
+            if (quickItalicBtn) quickItalicBtn.style.background = isItalicNow ? 'rgba(59,130,246,0.3)' : '';
             const quickUnderlineBtn = document.getElementById('btnQuickUnderline');
-            if (quickUnderlineBtn && underlineBtn) quickUnderlineBtn.style.background = underlineBtn.style.background;
+            if (quickUnderlineBtn) quickUnderlineBtn.style.background = isUnderNow ? 'rgba(59,130,246,0.3)' : '';
             colorInp.value = rgbToHex(computed.color) || '#000000';
             bgInp.value = rgbToHex(computed.backgroundColor) || '#ffffff';
             if (classSel) {
@@ -12708,6 +12764,17 @@ if (isset($_GET['action'])) {
 
         // opts.fromDropdown: alegere din lista de clase CSS → aplică (nu comută) și
         // scoate toate span-urile de formatare din bucata selectată.
+        // Titlurile H1–H6 devin <p> când primesc clasele de paragraf
+        // (<h2>…</h2> + clasa text_obisnuit2 → <p class="text_obisnuit2">…</p>).
+        function demoteHeadingForTextClass(block, value) {
+            if (!block || !/^H[1-6]$/.test(block.tagName || '')) return block;
+            if (value !== 'text_obisnuit' && value !== 'text_obisnuit2') return block;
+            const p = block.ownerDocument.createElement('p');
+            while (block.firstChild) p.appendChild(block.firstChild);
+            block.replaceWith(p);
+            return p;
+        }
+
         function applyClassProperty(value, opts) {
             const fromDropdown = !!(opts && opts.fromDropdown);
             // Push the current body state BEFORE the change so undo can revert it
@@ -12758,6 +12825,7 @@ if (isset($_GET['action'])) {
                     // Tot paragraful selectat → tot paragraful în clasa aleasă,
                     // fără span-uri cu alte clase/stiluri rămase înăuntru.
                     targetBlock.removeAttribute('data-orig-class');
+                    targetBlock = demoteHeadingForTextClass(targetBlock, value);
                     targetBlock.className = value;
                     unwrapFormattingSpans(targetBlock);
                     syncFromDesign();
@@ -12771,6 +12839,7 @@ if (isset($_GET['action'])) {
                 }
 
                 if (targetBlock) {
+                    targetBlock = demoteHeadingForTextClass(targetBlock, value);
                     if (value && targetBlock.classList.contains(value)) {
                         // Toggle off: restaurează clasa originală salvată
                         const origClass = targetBlock.getAttribute('data-orig-class');
@@ -12859,6 +12928,7 @@ if (isset($_GET['action'])) {
                         !spannedBlocks.some(other => other !== b && b.contains(other)));
                     if (leafBlocks.length) {
                         leafBlocks.forEach(b => {
+                            b = demoteHeadingForTextClass(b, value);
                             if (!b.hasAttribute('data-orig-class')) {
                                 b.setAttribute('data-orig-class', b.className || '');
                             }
@@ -12905,8 +12975,9 @@ if (isset($_GET['action'])) {
                 }
             } else {
                 // Case 4: no text selection (cursor only) → change the clicked element's class directly
-                const el = getDesignSelection();
+                let el = getDesignSelection();
                 if (!el) return;
+                el = demoteHeadingForTextClass(el, value);
                 if (value && el.classList.contains(value)) {
                     // Toggle off: restaurează clasa originală salvată
                     const origClass = el.getAttribute('data-orig-class');
@@ -13442,23 +13513,6 @@ if (isset($_GET['action'])) {
             document.getElementById('propFont').addEventListener('change', () => applyFontProperty('fontFamily', document.getElementById('propFont').value));
             document.getElementById('propClass').addEventListener('change', () => applyClassProperty(document.getElementById('propClass').value, { fromDropdown: true }));
             document.getElementById('propSize').addEventListener('change', () => applyFontProperty('fontSize', document.getElementById('propSize').value));
-            document.getElementById('propBold').addEventListener('mousedown', e => e.preventDefault());
-            document.getElementById('propBold').addEventListener('click', () => {
-                // Cursor în paragraf (sau tot paragraful selectat) → comută text_obisnuit2 / text_obisnuit
-                if (toggleBoldParagraphStyle()) return;
-                toggleInlineFormat('bold');
-            });
-            document.getElementById('propItalic').addEventListener('mousedown', e => e.preventDefault());
-            document.getElementById('propItalic').addEventListener('click', () => {
-                toggleInlineFormat('italic');
-            });
-            const propUnderline = document.getElementById('propUnderline');
-            if (propUnderline) {
-                propUnderline.addEventListener('mousedown', e => e.preventDefault());
-                propUnderline.addEventListener('click', () => {
-                    toggleInlineFormat('underline');
-                });
-            }
             const quickItalicTop = document.getElementById('btnQuickItalic');
             if (quickItalicTop) {
                 quickItalicTop.addEventListener('mousedown', e => e.preventDefault());
