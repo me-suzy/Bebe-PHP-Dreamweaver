@@ -6589,6 +6589,67 @@ if (isset($_GET['action'])) {
             return true;
         }
 
+        // Data scrisă de mână: „On <Lună> <zi>, <an>”, cu luna în limba folderului.
+        // Întoarce textul normalizat („On Aprilie 21, 2026”) sau un mesaj de eroare.
+        function parseManualArticleDate(value, lang) {
+            const months = DATE_DUP_MONTHS[lang] || DATE_DUP_MONTHS.ro;
+            const example = lang === 'en' ? 'On April 21, 2026' : 'On Aprilie 21, 2026';
+            const m = /^On\s+([^\s\d,]+)\s+(\d{1,2}),\s*(\d{4})$/i.exec(String(value || '').trim().replace(/\s+/g, ' '));
+            if (!m) return { error: 'Scrie data exact în forma „' + example + '”.' };
+            const mi = months.findIndex(x => x.toLowerCase() === m[1].toLowerCase());
+            if (mi === -1) return { error: 'Luna „' + m[1] + '” nu e o lună ' + (lang === 'en' ? 'în engleză' : 'în română') + ' (ex. „' + example + '”).' };
+            const day = +m[2], year = +m[3];
+            const d = new Date(year, mi, day);
+            if (d.getFullYear() !== year || d.getMonth() !== mi || d.getDate() !== day) return { error: 'Data nu există în calendar: ' + day + ' ' + months[mi] + ' ' + year + '.' };
+            if (d > new Date()) return { error: 'Data e în viitor.' };
+            return { text: 'On ' + months[mi] + ' ' + String(day).padStart(2, '0') + ', ' + year };
+        }
+
+        function manualDateRow(lang, g, currentPath, box, card) {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px';
+            const label = document.createElement('span');
+            label.style.cssText = 'color:#9ca3af;font-size:14px';
+            label.textContent = 'Sau scrie tu data:';
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.placeholder = lang === 'en' ? 'On April 21, 2026' : 'On Aprilie 21, 2026';
+            input.style.cssText = 'flex:0 1 230px;min-width:180px;background:#15161d;border:1px solid #444;border-radius:6px;padding:5px 10px;color:#eee;font-size:14px';
+            const add = document.createElement('button');
+            add.type = 'button';
+            add.textContent = 'Adaugă';
+            add.style.cssText = 'padding:5px 16px;border:1px solid #b91c1c;border-radius:6px;background:#dc2626;color:#fff;font:600 14px system-ui;cursor:pointer';
+            const msg = document.createElement('div');
+            msg.style.cssText = 'flex-basis:100%;font-size:13px;color:#fca5a5;display:none';
+            const run = async () => {
+                const parsed = parseManualArticleDate(input.value, lang);
+                if (parsed.error) { msg.textContent = parsed.error; msg.style.display = 'block'; input.focus(); return; }
+                msg.style.display = 'none';
+                // Data ta înlocuiește propunerile: le scot din card
+                card.querySelectorAll('button').forEach(b => { if (/^On\s/.test(b.textContent)) b.remove(); });
+                const proposals = Array.from(card.querySelectorAll('div')).find(d => /^Date libere/.test(d.textContent || ''));
+                if (proposals) proposals.remove();
+                add.disabled = true; input.disabled = true; add.style.opacity = '.6';
+                let ok;
+                if (currentPath) {
+                    ok = applyDateToOpenArticle(currentPath, parsed.text);
+                    if (ok) {
+                        box.remove();
+                        toast('Data a fost schimbată în ' + parsed.text.replace(/^On\s+/i, '') + '. Verific din nou peste 10 s; salvează (Ctrl+S) ca să intre și în categorie.');
+                    }
+                } else {
+                    const tf = g.files.find(x => dateDupNormPath(x.file) === dateDupNormPath(g.target));
+                    ok = await applyDateToFileOnDisk(g.target, tf ? tf.date : '', tf ? tf.cat : '', parsed.text);
+                    if (ok) runFullDateDuplicateCheck(true); // din nou verificarea normală: poate data ta se repetă
+                }
+                if (!ok) { add.disabled = false; input.disabled = false; add.style.opacity = ''; }
+            };
+            add.onclick = run;
+            input.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); run(); } });
+            row.append(label, input, add, msg);
+            return row;
+        }
+
         // „Aplică” din lista mare: schimbă data direct în fișier (doar textul datei, cu backup pe server),
         // apoi în blocul lui din categorie și din index, iar pentru ro și în traducerea en.
         async function applyDateToFileOnDisk(path, oldDate, catLink, newDate) {
@@ -6846,6 +6907,8 @@ if (isset($_GET['action'])) {
                         });
                         card.appendChild(alt);
                     }
+                    // O dată aleasă de tine, în locul celor propuse: „On Aprilie 21, 2026” (ro) / „On April 21, 2026” (en)
+                    if (g.target && !opts.id) card.appendChild(manualDateRow(sec.lang, g, currentPath, box, card));
                     body.appendChild(card);
                 });
             });
@@ -8193,7 +8256,7 @@ if (isset($_GET['action'])) {
             // Paste în Code cu <span style="font-family…"> (stil AI) → rescris imediat în stilul site-ului
             editor.on('change', (cm, change) => {
                 if (!change || change.origin !== 'paste') return;
-                if (!/<span\b[^>]*\bstyle\s*=/i.test((change.text || []).join('\n'))) return;
+                if (!/<(?:span|em|i|strong|b|u)\b[^>]*\bstyle\s*=/i.test((change.text || []).join('\n'))) return;
                 if (!isCurrentFileHtml()) return;
                 setTimeout(() => {
                     const src = cm.getValue();
@@ -9407,10 +9470,22 @@ if (isset($_GET['action'])) {
             return !cls || /^text_obisnuit2?$/.test(cls);
         }
 
+        // În paragrafele de text (text_obisnuit / text_obisnuit2) formatarea e doar prin taguri curate:
+        // <em>, <strong>, <u>… fără style (Chrome adaugă singur style="font-weight: normal;" pe <em>
+        // când scrii/lipești peste text italic într-un paragraf bold).
+        const FORMAT_WITH_STYLE = 'em[style],i[style],strong[style],b[style],u[style]';
+        function stripStyleFromFormattingTags(p) {
+            if (!p.classList || !(p.classList.contains('text_obisnuit') || p.classList.contains('text_obisnuit2'))) return false;
+            const tags = p.querySelectorAll(FORMAT_WITH_STYLE);
+            tags.forEach(el => el.removeAttribute('style'));
+            return tags.length > 0;
+        }
+
         function cleanAiStyledSpansInParagraph(p) {
             if (!p || !p.querySelectorAll) return false;
+            const styledFormatting = stripStyleFromFormattingTags(p);
             const spans = Array.prototype.slice.call(p.querySelectorAll('span[style]')).filter(isAiStyledSpan);
-            if (!spans.length) return false;
+            if (!spans.length) return styledFormatting;
             const doc = p.ownerDocument;
             const boldRe = /font-weight\s*:\s*(?:bold|bolder|[6-9]00)\b/i;
             const isBoldSpan = function (el) {
@@ -9454,7 +9529,7 @@ if (isset($_GET['action'])) {
             if (!root || !root.querySelectorAll) return false;
             let changed = false;
             Array.prototype.slice.call(root.querySelectorAll('p')).forEach(function (p) {
-                if (p.querySelector('span[style]') && cleanAiStyledSpansInParagraph(p)) changed = true;
+                if (p.querySelector('span[style],' + FORMAT_WITH_STYLE) && cleanAiStyledSpansInParagraph(p)) changed = true;
             });
             return changed;
         }
@@ -9464,11 +9539,12 @@ if (isset($_GET['action'])) {
         function computeAiStyledSpanEdits(html) {
             html = String(html || '');
             const edits = [];
-            if (!/<span\b[^>]*\bstyle\s*=/i.test(html)) return edits;
+            const styledRe = /<(?:span|em|i|strong|b|u)\b[^>]*\bstyle\s*=/i;
+            if (!styledRe.test(html)) return edits;
             const re = /<p\b[^>]*>[\s\S]*?<\/p>/gi;
             let m;
             while ((m = re.exec(html)) !== null) {
-                if (!/<span\b[^>]*\bstyle\s*=/i.test(m[0])) continue;
+                if (!styledRe.test(m[0])) continue;
                 const tpl = document.createElement('template');
                 tpl.innerHTML = m[0];
                 const p = tpl.content.firstElementChild;
