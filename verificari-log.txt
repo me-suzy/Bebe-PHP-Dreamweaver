@@ -1,0 +1,8 @@
+2026-11-25 06:41:21  GĂSIT      [Categorie și dată greșite] en/movie-scripts.html ↔ ro/scenarii-de-film.html; categorie: linkul din articol leadership-know-how.html, bloc în leadership-50-extra.html → en/leadership-50-extra.html; dată: On December 20, 2012 → On May 07, 2008
+2026-11-25 06:44:08  REPARAT    (OK, aplică)  [Categorie și dată greșite] en/movie-scripts.html ↔ ro/scenarii-de-film.html; categorie: linkul din articol leadership-know-how.html, bloc în leadership-50-extra.html → en/leadership-50-extra.html; dată: On December 20, 2012 → On May 07, 2008
+2026-11-25 06:44:38  GĂSIT      [Categorie și dată greșite] en/movie-scripts.html ↔ ro/scenarii-de-film.html; categorie: linkul din articol leadership-know-how.html, bloc în leadership-50-extra.html → en/leadership-50-extra.html; dată: On December 20, 2012 → On May 07, 2008
+2026-11-25 06:44:52  REPARAT    (OK, aplică)  [Categorie și dată greșite] en/movie-scripts.html ↔ ro/scenarii-de-film.html; categorie: linkul din articol leadership-know-how.html, bloc în leadership-50-extra.html → en/leadership-50-extra.html; dată: On December 20, 2012 → On May 07, 2008
+2026-11-25 06:45:10  GĂSIT      [Dată greșită] en/movie-scripts.html ↔ ro/scenarii-de-film.html; dată: On May 8, 2008 → On May 07, 2008
+2026-11-25 06:45:28  REPARAT    (OK, aplică)  [Dată greșită] en/movie-scripts.html ↔ ro/scenarii-de-film.html; dată: On May 8, 2008 → On May 07, 2008
+2026-11-25 06:49:16  GĂSIT      [Dată greșită] en/movie-scripts.html ↔ ro/scenarii-de-film.html; dată: On May 8, 2008 → On May 07, 2008
+2026-11-25 06:50:03  REPARAT    (OK, aplică)  [Dată greșită] en/movie-scripts.html ↔ ro/scenarii-de-film.html; dată: On May 8, 2008 → On May 07, 2008

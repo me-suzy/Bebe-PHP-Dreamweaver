@@ -1,11 +1,12 @@
 {
   "ok": true,
-  "time": "2026-11-23T16:10:45.198442",
+  "time": "2026-11-25T06:50:47.656250",
   "dry_run": false,
   "checked": {
-    "ro": 1971,
-    "en": 1971
+    "ro": 1972,
+    "en": 1972
   },
   "changes": [],
-  "issues": []
+  "issues": [],
+  "proposals": []
 }

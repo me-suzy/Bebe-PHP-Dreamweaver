@@ -1,4 +1,10 @@
-"""Resumeable Translate -> EN design/publication -> RO design/publication."""
+"""Resumeable Translate -> RO design/publication -> EN design/publication.
+
+RO se publica PRIMUL: scripturile de design EN (imaginea articolului si a cardului din
+categorie) citesc imaginea din fisierul RO echivalent din Principal 2022/ro, iar acel fisier
+are imaginea abia dupa ce a trecut prin designul RO. Fisierele EN asteapta intre timp intr-un
+folder de rezerva, ca sa nu se amestece cu cele RO in c:/Folder1/fisiere_html.
+"""
 import hashlib
 import json
 import msvcrt
@@ -20,6 +26,7 @@ NEW_SITE = SITE.with_name('Principal 2022')
 INPUT = Path(r'C:\Folder1\fisiere_html')
 OUTPUT = Path(r'C:\Folder1\fisiere_gata')
 PENDING = APP / 'translation-publication.json'
+HOLD_ROOT = APP / 'translation-hold'
 
 def log(message):
     print(message, flush=True)
@@ -67,10 +74,69 @@ def initialize(run):
     for name in ro:
         if not (SITE/'ro'/name).is_file():
             raise RuntimeError('Lipsește corespondentul RO: ' + name)
-    state = dict(run=str(run), phase='en', design_done=False, files=sorted(actual),
-                 ro_files=sorted(ro), articles=status['fisiere'], published=[], complete=False)
+    state = dict(run=str(run), order='ro-first', phase='hold-en', design_done=False,
+                 en_files=sorted(actual), files=sorted(actual), ro_files=sorted(ro),
+                 articles=status['fisiere'], published=[], complete=False)
     save(state)
     return state
+
+def hold_en(state):
+    """Muta fisierele EN din fisiere_html intr-un folder de rezerva, ca sa se poata proiecta intai RO."""
+    expected = set(state['en_files'])
+    hold = Path(state.get('hold') or HOLD_ROOT / Path(state['run']).name)
+    hold.mkdir(parents=True, exist_ok=True)
+    state['hold'] = str(hold)
+    if set(html_files(hold)) - expected:
+        raise RuntimeError('Folderul de rezerva EN contine fisiere straine: ' + str(hold))
+    if html_files(OUTPUT):
+        raise RuntimeError('fisiere_gata conține HTML-uri din altă lucrare. Mută-le înainte de publicare.')
+    hashes = state.get('en_hashes', {})
+    for name in sorted(expected):
+        src, dest = INPUT/name, hold/name
+        if src.exists():
+            if dest.exists() and digest(dest) != digest(src):
+                raise RuntimeError('Fișier EN diferit în folderul de rezervă: ' + name)
+            if not dest.exists():
+                shutil.copyfile(src, dest)
+            if digest(dest) != digest(src):
+                raise RuntimeError('Copiere locală incompletă (rezervă EN): ' + name)
+            hashes[name] = digest(dest)
+            state['en_hashes'] = hashes
+            save(state)
+            src.unlink()
+        elif not dest.exists():
+            raise RuntimeError('Lipsește fișierul EN de export: ' + name)
+    state['en_hashes'] = {name: digest(hold/name) for name in expected}
+    state['phase'] = 'stage-ro'
+    save(state)
+    log('Fișierele EN au fost puse deoparte; proiectez și public întâi RO, apoi EN.')
+
+def restore_en(state):
+    """Aduce fisierele EN inapoi in fisiere_html dupa ce RO a fost publicat."""
+    expected = set(state['en_files'])
+    hold = Path(state['hold'])
+    hashes = state['en_hashes']
+    if set(html_files(INPUT)) - expected or html_files(OUTPUT):
+        raise RuntimeError('Folderele de lucru conțin fișiere străine. Le păstrez.')
+    for name in sorted(expected):
+        src, dest = hold/name, INPUT/name
+        if src.exists():
+            if digest(src) != hashes[name]:
+                raise RuntimeError('Fișier EN modificat în folderul de rezervă: ' + name)
+            if not dest.exists():
+                shutil.copyfile(src, dest)
+        if not dest.exists() or digest(dest) != hashes[name]:
+            raise RuntimeError('Nu pot readuce fișierul EN în fisiere_html: ' + name)
+    state.update(phase='en', files=sorted(expected), design_done=False, design_started=False,
+                 cleanup=False, published=[])
+    save(state)
+    for name in expected:
+        (hold/name).unlink(missing_ok=True)
+    try:
+        hold.rmdir()
+    except OSError:
+        pass
+    log('RO este publicat; proiectez și public acum EN.')
 
 def validate_outputs(state):
     expected = set(state['files'])
@@ -164,6 +230,10 @@ def publish(state):
     if state['phase']=='prepare':
         state=initialize(Path(state['run']))
     while not state.get('complete'):
+        if state.get('phase') == 'hold-en':
+            hold_en(state)
+        if state.get('phase') == 'restore-en':
+            restore_en(state)
         if state.get('phase') == 'stage-ro':
             expected = set(state['ro_files'])
             if set(html_files(INPUT))-expected or html_files(OUTPUT):
@@ -179,7 +249,12 @@ def publish(state):
         if not state.get('cleanup'):
             publish_phase(state)
         cleanup(state)
-        if state['phase']=='en':
+        if state.get('order') == 'ro-first':
+            if state['phase'] == 'ro':
+                state.update(phase='restore-en', cleanup=False)
+            else:
+                state['complete'] = True
+        elif state['phase']=='en':
             state.update(phase='stage-ro',cleanup=False)
         else:
             state['complete']=True

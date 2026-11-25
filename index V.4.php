@@ -965,16 +965,84 @@ if (isset($_GET['action'])) {
     if ($action === 'generateRSS') {
         @set_time_limit(600); ini_set('display_errors', '0');
         $dir = 'E:/Carte/BB/17 - Site Leadership/alte/Ionel Balauta/Aryeht/Task 1 - Traduce tot site-ul/Doar Google Web/Andreea/Meditatii/Sedinta 13';
-        $logs = [];
-        foreach (['EN', 'RO'] as $lang) {
+        // EN și RO pornesc în paralel (fiecare ~2 s singur); apoi verific că fișierele din Principal 2022 chiar au fost rescrise.
+        $python = 'C:/Users/necul/AppData/Local/Programs/Python/Python312/python.exe';
+        $targets = ['EN' => 'E:/Carte/BB/17 - Site Leadership/Principal 2022/en/rss.xml', 'RO' => 'E:/Carte/BB/17 - Site Leadership/Principal 2022/ro/rss.xml'];
+        $started = microtime(true);
+        $before = [];
+        $jobs = [];
+        foreach ($targets as $lang => $target) {
+            clearstatcache(true, $target);
+            $before[$lang] = is_file($target) ? ['mtime' => filemtime($target), 'size' => filesize($target)] : null;
             $err = tempnam(sys_get_temp_dir(), 'rss');
-            $process = proc_open(['C:/Users/necul/AppData/Local/Programs/Python/Python312/python.exe', '-X', 'utf8', $dir . '/rss XML 2024 ' . $lang . '.py'], [0=>['pipe','r'],1=>['pipe','w'],2=>['file',$err,'a']], $pipes, $dir, null, ['bypass_shell'=>true]);
-            if (!is_resource($process)) { echo json_encode(['ok'=>false,'error'=>'Nu pot porni RSS ' . $lang]); exit; }
-            fclose($pipes[0]); $logs[] = stream_get_contents($pipes[1]); fclose($pipes[1]); $code = proc_close($process);
-            $errors = file_get_contents($err); @unlink($err);
-            if ($code !== 0) { echo json_encode(['ok'=>false,'error'=>implode("\n",$logs) . $errors]); exit; }
+            $process = proc_open([$python, '-X', 'utf8', $dir . '/rss XML 2024 ' . $lang . '.py'], [0=>['pipe','r'],1=>['pipe','w'],2=>['file',$err,'a']], $pipes, $dir, null, ['bypass_shell'=>true]);
+            if (!is_resource($process)) { echo json_encode(['ok'=>false,'error'=>'Nu pot porni RSS ' . $lang], JSON_UNESCAPED_UNICODE); exit; }
+            fclose($pipes[0]);
+            stream_set_blocking($pipes[1], false);
+            $jobs[$lang] = ['proc' => $process, 'out' => $pipes[1], 'err' => $err, 'log' => '', 'code' => null];
         }
-        echo json_encode(['ok'=>true,'log'=>'RSS a fost generat în RO și în EN.'], JSON_UNESCAPED_UNICODE); exit;
+        while (true) {
+            $running = 0;
+            foreach ($jobs as $lang => &$job) {
+                if ($job['code'] !== null) continue;
+                $job['log'] .= (string) stream_get_contents($job['out']);
+                $status = proc_get_status($job['proc']);
+                if ($status['running']) { $running++; continue; }
+                $job['log'] .= (string) stream_get_contents($job['out']);
+                $job['code'] = $status['exitcode'];
+                fclose($job['out']);
+                proc_close($job['proc']);
+            }
+            unset($job);
+            if (!$running) break;
+            if (microtime(true) - $started > 300) {
+                foreach ($jobs as $job) if ($job['code'] === null) proc_terminate($job['proc']);
+                echo json_encode(['ok'=>false,'error'=>'Generarea RSS a depășit 5 minute și a fost oprită.'], JSON_UNESCAPED_UNICODE); exit;
+            }
+            usleep(100000);
+        }
+        $lines = [];
+        date_default_timezone_set('Europe/Bucharest');
+        foreach ($jobs as $lang => $job) {
+            $errors = (string) @file_get_contents($job['err']); @unlink($job['err']);
+            if ($job['code'] !== 0) { echo json_encode(['ok'=>false,'error'=>"RSS $lang a eșuat (cod " . $job['code'] . "):\n" . $job['log'] . $errors], JSON_UNESCAPED_UNICODE); exit; }
+            $target = $targets[$lang];
+            clearstatcache(true, $target);
+            $fresh = is_file($target) && filemtime($target) >= (int) $started - 1;
+            if (!$fresh) { echo json_encode(['ok'=>false,'error'=>"RSS $lang: scriptul s-a terminat, dar fișierul NU a fost rescris: $target"], JSON_UNESCAPED_UNICODE); exit; }
+            $xml = (string) file_get_contents($target);
+            $lines[] = "$lang: " . str_replace('/', '\\', $target) . ' — rescris la ' . date('H:i:s', filemtime($target)) . ', ' . number_format(filesize($target) / 1024, 0) . ' KB, ' . substr_count($xml, '<item>') . ' articole'
+                . ($before[$lang] ? ' (înainte: ' . date('H:i:s', $before[$lang]['mtime']) . ', ' . number_format($before[$lang]['size'] / 1024, 0) . ' KB)' : '');
+        }
+        echo json_encode(['ok'=>true,'log'=>"RSS a fost generat în RO și în EN în " . round(microtime(true) - $started, 1) . " s.\n" . implode("\n", $lines)], JSON_UNESCAPED_UNICODE); exit;
+    }
+    // Amprenta ieftina a site-ului (Principal/ro si /en): numarul de HTML-uri + cea mai noua data de
+    // modificare. Se schimba cand copiezi/inlocuiesti un fisier -> editorul porneste imediat verificarile.
+    if ($action === 'siteStamp') {
+        $count = 0; $newest = 0; $sum = 0;
+        foreach (['ro', 'en'] as $lang) {
+            foreach ((array) glob('E:/Carte/BB/17 - Site Leadership/Principal/' . $lang . '/*.html') as $f) {
+                $m = (int) @filemtime($f);
+                $count++; $sum += $m; if ($m > $newest) $newest = $m;
+            }
+        }
+        echo json_encode(['ok' => true, 'stamp' => $count . '-' . $newest . '-' . $sum]);
+        exit;
+    }
+    // Jurnalul verificarilor (verificari-log.txt): randurile trimise de editor (ex. date duplicate)
+    if ($action === 'appendCheckLog' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $lines = json_decode($_POST['lines'] ?? '[]', true);
+        if (is_array($lines) && $lines) {
+            date_default_timezone_set('Europe/Bucharest');
+            $stamp = date('Y-m-d H:i:s');
+            $out = '';
+            foreach (array_slice($lines, 0, 200) as $line) {
+                $out .= $stamp . '  ' . str_replace(["\r", "\n"], ' ', (string) $line) . "\n";
+            }
+            @file_put_contents(__DIR__ . '/verificari-log.txt', $out, FILE_APPEND | LOCK_EX);
+        }
+        echo json_encode(['ok' => true]);
+        exit;
     }
     if ($action === 'categoryPairSync') {
         ini_set('display_errors', '0');
@@ -986,8 +1054,9 @@ if (isset($_GET['action'])) {
         }
         $python = 'C:/Users/necul/AppData/Local/Programs/Python/Python312/python.exe';
         $exclude = $_POST['exclude'] ?? '[]';
+        $apply = $_POST['apply'] ?? '[]';
         $errorFile = tempnam(sys_get_temp_dir(), 'catsync');
-        $proc = proc_open([$python, __DIR__ . '/sync_ro_en_categories.py', '--exclude', $exclude],
+        $proc = proc_open([$python, __DIR__ . '/sync_ro_en_categories.py', '--exclude', $exclude, '--apply', $apply],
             [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', $errorFile, 'a']], $pipes, __DIR__, null, ['bypass_shell' => true]);
         if (!is_resource($proc)) { echo json_encode(['ok' => false, 'error' => 'Nu pot porni verificarea RO–EN']); exit; }
         fclose($pipes[0]); $output = stream_get_contents($pipes[1]); fclose($pipes[1]);
@@ -6284,17 +6353,63 @@ if (isset($_GET['action'])) {
         // Verificare completă: toate grupurile de articole cu aceeași dată, pe fiecare limbă
         let dateDupFullBusy = false;
         let dateDupLastAutomaticSignature = null;
+
+        // Jurnalul verificărilor (verificari-log.txt, lângă editor): același fișier ca verificarea RO–EN
+        function appendCheckLog(lines) {
+            if (!lines || !lines.length) return;
+            const apiBase = window.location.pathname.replace(/[#?].*$/, '');
+            fetch(apiBase + '?action=appendCheckLog', { method: 'POST', body: new URLSearchParams({ lines: JSON.stringify(lines) }) }).catch(() => { });
+        }
+        // Grupurile de date duplicate: GĂSIT când apar prima dată, REZOLVAT când dispar
+        function logDateDupGroups(sections) {
+            let before = {};
+            try { before = JSON.parse(localStorage.getItem('dateDupLoggedGroups') || '{}'); } catch (_) { before = {}; }
+            const now = {};
+            for (const sec of sections) for (const g of sec.groups) {
+                const key = sec.lang + ':' + g.key;
+                now[key] = '[Dată duplicată] ' + sec.lang + ': ' + String(g.files[0].date || '').replace(/^On\s+/i, '') + ' — '
+                    + g.files.map(f => f.file.replace(/\\/g, '/').split('/').pop()).join(', ');
+            }
+            const lines = [];
+            for (const k in now) if (!(k in before)) lines.push('GĂSIT      ' + now[k]);
+            for (const k in before) if (!(k in now)) lines.push('REZOLVAT   ' + before[k]);
+            try { localStorage.setItem('dateDupLoggedGroups', JSON.stringify(now)); } catch (_) { }
+            appendCheckLog(lines);
+        }
+
+        // Articolele en care au deja o propunere RO–EN cu dată (la OK primesc data din RO):
+        // nu le mai arăt și ca dată duplicată — fereastra RO–EN are prioritate.
+        function datesFixedByCategoryPairs() {
+            const set = new Set();
+            for (const p of (window.lastCategoryPairResult && window.lastCategoryPairResult.proposals) || []) {
+                if (p.date_correct && p.lang === 'en') set.add(String(p.article).toLowerCase());
+            }
+            return set;
+        }
+
         async function runFullDateDuplicateCheck(manual) {
             if (postponeValidation('all-dates', () => runFullDateDuplicateCheck(manual))) return;
             if (dateDupFullBusy) return;
+            if (!manual && !tabs.some(t => t.filePath && t.type !== 'browser')) {
+                // Prioritate: întâi verificarea RO–EN (poate repara singură data). Dacă rulează sau dacă
+                // site-ul s-a schimbat de la ultima ei rulare, o las pe ea întâi; ea pornește apoi și verificarea asta.
+                if (typeof syncCategoryPairs === 'function' && typeof getSiteStamp === 'function') {
+                    if (window.categoryPairSyncRunning) return;
+                    const stamp = await getSiteStamp();
+                    if (stamp && stamp !== window.lastCategoryPairStamp) { syncCategoryPairs().catch(console.error); return; }
+                }
+            }
             dateDupFullBusy = true;
             try {
             const sections = [];
+            const fixedByPairs = datesFixedByCategoryPairs();
             for (const dir of dateDupDirs()) {
                 let data;
                 try { data = await dateDupFetchDir(dir); } catch (e) { continue; }
                 const byKey = new Map();
-                data.items.filter(a => a.listed || a.cat).forEach(a => {
+                data.items.filter(a => a.listed || a.cat)
+                    .filter(a => !(data.lang === 'en' && fixedByPairs.has(a.file.replace(/\\/g, '/').split('/').pop().toLowerCase())))
+                    .forEach(a => {
                     if (!byKey.has(a.key)) byKey.set(a.key, []);
                     byKey.get(a.key).push(a);
                 });
@@ -6316,6 +6431,7 @@ if (isset($_GET['action'])) {
             // Automat (la pornire): lista mare apare doar dacă nu e deschis niciun HTML.
             // Cu un fișier deschis, apare doar fereastra mică, după ce îi schimbi data.
             if (postponeValidation('all-dates', () => runFullDateDuplicateCheck(manual))) return;
+            logDateDupGroups(sections);
             const signature = JSON.stringify(sections);
             if (!manual && signature === dateDupLastAutomaticSignature) return;
             dateDupLastAutomaticSignature = signature;
@@ -6489,6 +6605,8 @@ if (isset($_GET['action'])) {
             }
             const done = [name];
             const cat = String(catLink || '').split('#')[0].split('?')[0].split('/').pop();
+            appendCheckLog(['REPARAT    [Dată duplicată] ' + name + ': ' + String(oldDate || '?').replace(/^On\s+/i, '') + ' → '
+                + newDate.replace(/^On\s+/i, '') + ' (din fereastra Date duplicate)']);
             if (cat && await dateSyncReplace(dir + '/' + cat, 'list', name, newDate, oldDate)) done.push(cat);
             if (await dateSyncReplace(dir + '/index.html', 'list', name, newDate, oldDate)) done.push('index.html');
             if (/\/ro$/i.test(dir)) {
@@ -11149,34 +11267,113 @@ if (isset($_GET['action'])) {
             tick();
         }
         let categoryPairSyncPromise = null;
+        let rssGenerating = false;
         async function generateRssFeeds(button) {
+            if (rssGenerating) return;
+            rssGenerating = true;
             button.disabled = true;
             showEmailConsole('RSS — se generează…', 'Generez fluxurile EN și RO în Principal 2022…', '#facc15');
             try {
                 const r = await (await fetch('?action=generateRSS', {method:'POST'})).json();
                 showEmailConsole(r.ok ? 'RSS — gata' : 'RSS — eroare', r.log || r.error, r.ok ? '#4ade80' : '#f87171');
             } catch (e) { showEmailConsole('RSS — eroare', e.message, '#f87171'); }
-            finally { button.disabled = false; }
+            finally { button.disabled = false; rssGenerating = false; }
         }
-        function presentCategoryPairReport(result) {
-            if (postponeValidation('category-pairs', () => syncCategoryPairs())) return;
-            const changes = result.changes || [], issues = result.issues || [];
-            if (!changes.length && !issues.length) {
+        // Recuperările/corectările făcute automat rămân în fereastră până apeși „Am înțeles”
+        // (raportul de pe server se suprascrie la rularea următoare și altfel nu le-ai mai vedea).
+        function pendingCategoryChanges(newChanges) {
+            let pending = [];
+            try { pending = JSON.parse(localStorage.getItem('categoryPairPendingChanges') || '[]'); } catch (_) { pending = []; }
+            const seen = new Set(pending.map(c => JSON.stringify(c)));
+            for (const change of newChanges || []) {
+                const key = JSON.stringify(change);
+                if (!seen.has(key)) { pending.push(change); seen.add(key); }
+            }
+            localStorage.setItem('categoryPairPendingChanges', JSON.stringify(pending));
+            return pending;
+        }
+        // Cardul unei propuneri RO–EN, pe tipuri: „Categorie greșită”, „Categorie și dată greșite”,
+        // „Dată greșită”. Ce e acum greșit e pe roșu, ce se pune la OK (luat din RO) pe verde.
+        function categoryProposalDetails(p, card) {
+            const kinds = {
+                'categorie': { title: 'Categorie greșită', color: '#f59e0b', bg: '#2a2112' },
+                'categorie+data': { title: 'Categorie și dată greșite', color: '#f87171', bg: '#2b1618' },
+                'data': { title: 'Dată greșită', color: '#60a5fa', bg: '#132235' }
+            };
+            const k = kinds[p.kind] || kinds.categorie;
+            card.style.borderColor = k.color;
+            card.style.background = k.bg;
+            const wrap = document.createElement('div');
+            wrap.style.margin = '0 0 12px';
+            const el = (tag, css, text) => { const n = document.createElement(tag); if (css) n.style.cssText = css; if (text != null) n.textContent = text; return n; };
+            wrap.appendChild(el('div', 'font:700 17px system-ui;color:' + k.color + ';margin-bottom:6px', k.title));
+            wrap.appendChild(el('div', 'color:#cbd5e1;font-size:14px;margin-bottom:10px', 'en/' + p.article + '  ↔  ro/' + p.ro_article + ' (categoria RO: ' + p.ro_category + ')'));
+            const row = (label, wrong, right) => {
+                const r = el('div', 'display:grid;grid-template-columns:110px 1fr;gap:4px 10px;align-items:baseline;margin:6px 0');
+                r.appendChild(el('span', 'color:#94a3b8;font-size:13px;text-transform:uppercase;letter-spacing:.04em', label));
+                const vals = el('div');
+                vals.appendChild(el('div', 'color:#fca5a5;font:14px ui-monospace,Consolas,monospace', '✗ ' + wrong));
+                vals.appendChild(el('div', 'color:#86efac;font:14px ui-monospace,Consolas,monospace', '✓ ' + right));
+                r.appendChild(vals);
+                wrap.appendChild(r);
+            };
+            if (p.kind !== 'data') {
+                const listed = (p.category_listed || []);
+                const now = [];
+                if (p.category_line && p.category_line !== p.category_correct) now.push('linkul din articol: ' + p.category_line);
+                if (!(listed.length === 1 && listed[0] === p.category_correct)) now.push('blocul este în: ' + (listed.join(', ') || 'nicio categorie'));
+                row('Categorie', now.join('; ') || p.category_line, 'en/' + p.category_correct + ' (din ro/' + p.ro_category + ')');
+            }
+            if (p.date_correct) row('Dată', p.date_current || '(lipsă)', p.date_correct + ' (din ro/' + p.ro_article + ', în engleză)');
+            const fix = p.kind === 'data'
+                ? 'La „OK, aplică”: pun data din RO, în engleză, în articol, în blocul din categorie și în index.'
+                : 'La „OK, aplică”: corectez linkul de categorie din articol, pun blocul doar în categoria corectă'
+                  + (p.date_correct ? ' și preiau data din RO (articol, bloc din categorie, index).' : '.');
+            wrap.appendChild(el('div', 'color:#e2e8f0;font-size:14px;margin-top:8px', fix));
+            return wrap;
+        }
+        // force: la pornire și după „OK, aplică” fereastra se arată din nou cât timp problema nu e rezolvată.
+        function presentCategoryPairReport(result, force) {
+            if (postponeValidation('category-pairs', () => syncCategoryPairs([], force))) return;
+            const changes = pendingCategoryChanges(result.changes), issues = result.issues || [], proposals = result.proposals || [];
+            if (!changes.length && !issues.length && !proposals.length) {
                 localStorage.removeItem('categoryPairLastReport');
                 const oldReport = document.getElementById('categoryPairReport');
                 if (oldReport) oldReport.remove();
                 return;
             }
-            const signature = JSON.stringify(['clear-flags-v2', changes, issues]);
-            if (localStorage.getItem('categoryPairLastReport') === signature) return;
+            const signature = JSON.stringify(['clear-flags-v4', changes, issues, proposals]);
+            if (!force && localStorage.getItem('categoryPairLastReport') === signature) return;
             localStorage.setItem('categoryPairLastReport', signature);
             let dialog = document.getElementById('categoryPairReport');
             if (dialog) dialog.remove();
             dialog = document.createElement('dialog'); dialog.id = 'categoryPairReport';
-            dialog.style.cssText = 'max-width:820px;width:90%;max-height:80vh;overflow:auto;background:#202532;color:#fff;border:1px solid #536480;border-radius:14px;padding:24px;font:15px/1.6 system-ui';
+            dialog.style.cssText = 'margin:auto;inset:0;max-width:820px;width:90%;max-height:80vh;overflow:auto;background:#202532;color:#fff;border:1px solid #536480;border-radius:14px;padding:24px;font:15px/1.6 system-ui';
             const title = document.createElement('h2'); title.textContent = 'Verificare categorii și corespondențe RO–EN'; dialog.appendChild(title);
             for (const change of changes) {
-                const p = document.createElement('p'); p.textContent = 'Actualizat: ' + change.file + ' — adăugate: ' + change.articles.join(', '); dialog.appendChild(p);
+                const p = document.createElement('p');
+                                if (change.recovered) { p.textContent = 'Recuperat: ' + change.articles.join(', ') + ' — linkul și blocul lipseau din categoria ' + change.file + ' și au fost adăugate la loc (după dată).'; p.style.color = '#86efac'; }
+                                else p.textContent = 'Actualizat: ' + change.file + ' — adăugate: ' + change.articles.join(', ');
+                                dialog.appendChild(p);
+            }
+            for (const proposal of proposals) {
+                const card = document.createElement('div');
+                card.style.cssText = 'margin:14px 0;padding:16px;border:1px solid #b45309;border-radius:10px;background:#2a2112;overflow-wrap:anywhere';
+                const text = proposal.kind ? categoryProposalDetails(proposal, card) : document.createElement('p');
+                if (!proposal.kind) { text.style.margin = '0 0 12px'; text.textContent = proposal.message; }
+                const ok = document.createElement('button'); ok.textContent = 'OK, aplică';
+                ok.style.cssText = 'padding:8px 20px;border:1px solid #86efac;border-radius:8px;background:#166534;color:#fff;font:600 15px system-ui;cursor:pointer';
+                // dacă fereastra se redesenează cât timp se aplică, cardul rămâne „în lucru”
+                if (categoryPairApplying.has(proposal.id)) { ok.disabled = true; ok.textContent = 'Se aplică…'; ok.style.opacity = '.7'; }
+                ok.onclick = async () => {
+                    categoryPairApplying.add(proposal.id);
+                    ok.disabled = true; ok.style.opacity = '.7';
+                    ok.textContent = categoryPairSyncPromise ? 'Aștept verificarea în curs…' : 'Se aplică…';
+                    try { await syncCategoryPairs([proposal.id]); }
+                    catch (e) { ok.disabled = false; ok.style.opacity = ''; ok.textContent = 'OK, aplică'; showEmailConsole('Corectare categorie — eroare', e.message, '#f87171'); }
+                    finally { categoryPairApplying.delete(proposal.id); }
+                };
+                card.append(text, ok); dialog.appendChild(card);
             }
             const corrections = new Map();
             for (const issue of issues) {
@@ -11211,9 +11408,18 @@ if (isset($_GET['action'])) {
                 if (covered) continue;
                 const p = document.createElement('p'); p.textContent = issue; p.style.color = '#fcd18b'; dialog.appendChild(p);
             }
-            const button = document.createElement('button'); button.textContent = 'Am înțeles'; button.onclick = () => { dialog.close(); dialog.remove(); }; dialog.appendChild(button);
-            button.style.cssText = 'padding:12px 28px;margin-top:16px;border:1px solid #6aa8ff;border-radius:10px;background:linear-gradient(135deg,#2563eb,#4f46e5);color:white;font:600 17px system-ui;cursor:pointer;box-shadow:0 4px 12px #0005';
-            title.style.cssText = 'cursor:move;touch-action:none;user-select:none;margin-top:0;padding:8px 0';
+            // × în colț (în locul butonului „Am înțeles”): închide fereastra și uită mesajele informative
+            const close = document.createElement('button');
+            close.type = 'button';
+            close.title = 'Închide';
+            close.setAttribute('aria-label', 'Închide');
+            close.innerHTML = '<i class="fas fa-xmark"></i>';
+            close.style.cssText = 'position:absolute;top:14px;right:14px;width:34px;height:34px;border:0;border-radius:50%;background:#2c3447;color:#cbd5e1;font-size:16px;cursor:pointer';
+            close.onmouseenter = () => { close.style.background = '#ef4444'; close.style.color = '#fff'; };
+            close.onmouseleave = () => { close.style.background = '#2c3447'; close.style.color = '#cbd5e1'; };
+            close.onclick = () => { localStorage.removeItem('categoryPairPendingChanges'); dialog.close(); dialog.remove(); };
+            dialog.appendChild(close);
+            title.style.cssText = 'cursor:move;touch-action:none;user-select:none;margin-top:0;padding:8px 44px 8px 0';
             title.onpointerdown = event => {
                 if (event.button !== 0) return;
                 const rect = dialog.getBoundingClientRect(), x = event.clientX, y = event.clientY;
@@ -11224,17 +11430,54 @@ if (isset($_GET['action'])) {
             };
             document.body.appendChild(dialog); dialog.showModal();
         }
-        async function syncCategoryPairs() {
-            if (categoryPairSyncPromise) return categoryPairSyncPromise;
+        let lastCategoryPairRun = 0;
+        window.lastCategoryPairStamp = null;   // amprenta site-ului la ultima verificare RO–EN
+        window.lastCategoryPairResult = null;  // ultimul raport (propunerile RO–EN au prioritate față de datele duplicate)
+        async function getSiteStamp() {
+            try {
+                const r = await (await fetch('?action=siteStamp', { cache: 'no-store' })).json();
+                return r && r.ok ? r.stamp : null;
+            } catch (_) { return null; }
+        }
+        const categoryPairApplying = new Set(); // propunerile la care s-a apăsat OK și încă se aplică
+        async function syncCategoryPairs(applyIds, force) {
+            const applying = !!(applyIds && applyIds.length);
+            if (categoryPairSyncPromise) {
+                // O verificare simplă rulează deja: o verificare nouă nu mai e necesară, dar un OK
+                // (aplicare) trebuie trimis după ea, altfel s-ar pierde.
+                if (!applying) return categoryPairSyncPromise;
+                try { await categoryPairSyncPromise; } catch (_) { }
+                if (categoryPairSyncPromise) return syncCategoryPairs(applyIds, force);
+            }
+            window.categoryPairSyncRunning = true;
+            let completed = false; // true doar dacă verificarea chiar a rulat (nu „ocupat”, nu eroare)
             categoryPairSyncPromise = (async () => {
+                const stampAtStart = await getSiteStamp();
                 const exclude = tabs.filter(t => t.isDirty || (t.id === activeTabId && editor && normalizeHtmlForSyncCompare(editor.getValue()) !== normalizeHtmlForSyncCompare(t.originalContent))).map(t => t.filePath).filter(Boolean);
-                let result;
+                let result, tries = 0;
                 do {
-                    result = await (await fetch('?action=categoryPairSync', { method: 'POST', body: new URLSearchParams({ exclude: JSON.stringify(exclude) }) })).json();
-                    if (result.busy) await new Promise(resolve => setTimeout(resolve, 2000));
+                    // la aplicare, serverul așteaptă singur lacătul (până la 3 min); verificările simple renunță
+                    result = await (await fetch('?action=categoryPairSync', { method: 'POST', body: new URLSearchParams({ exclude: JSON.stringify(exclude), apply: JSON.stringify(applyIds || []) }) })).json();
+                    if (result.busy) {
+                        if (!applying) return result; // altă verificare rulează deja; raportul ei e suficient
+                        if (++tries >= 3) throw new Error('Serverul este ocupat cu altă verificare. Încearcă din nou peste un minut.');
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                    }
                 } while (result.busy);
+                lastCategoryPairRun = Date.now();
                 if (!result.ok) throw new Error(result.error || 'Verificarea RO–EN a eșuat');
-                presentCategoryPairReport(result);
+                // după o aplicare, fișierele s-au schimbat chiar acum: iau amprenta de după
+                window.lastCategoryPairStamp = applying ? await getSiteStamp() : stampAtStart;
+                window.lastCategoryPairResult = result;
+                completed = true;
+                if (applying) {
+                    // Ce am aplicat dispare din fereastră (cardul); nu-l mai arăt ca „Recuperat”.
+                    const left = (result.proposals || []).map(p => p.id);
+                    const done = applyIds.filter(id => !left.includes(id));
+                    if (done.length) toast('Aplicat: ' + done.map(id => id.replace(/^(ro|en)\//, '$1/').replace(/->.*$/, '')).join(', '));
+                    result = Object.assign({}, result, { changes: [] });
+                }
+                presentCategoryPairReport(result, force || applying);
                 for (const change of result.changes || []) {
                     const tab = findTabByPath(change.file);
                     if (!tab || tab.isDirty) continue;
@@ -11248,18 +11491,33 @@ if (isset($_GET['action'])) {
                 }
                 return result;
             })();
-            try { return await categoryPairSyncPromise; } finally { categoryPairSyncPromise = null; }
+            try { return await categoryPairSyncPromise; }
+            finally {
+                categoryPairSyncPromise = null;
+                window.categoryPairSyncRunning = false;
+                // apoi verificarea datelor duplicate, fără articolele pe care RO–EN le repară deja
+                if (completed && typeof runFullDateDuplicateCheck === 'function' && !tabs.some(t => t.filePath && t.type !== 'browser')) {
+                    setTimeout(() => runFullDateDuplicateCheck(false).catch(console.error), 0);
+                }
+            }
         }
         window.addEventListener('load', () => {
-            fetch('?action=categoryPairSync&report=1', { cache: 'no-store' }).then(r => r.json()).then(presentCategoryPairReport).catch(console.error);
-            syncCategoryPairs().catch(e => showEmailConsole('Sincronizare RO–EN — eroare', e.message, '#f87171'));
+            fetch('?action=categoryPairSync&report=1', { cache: 'no-store' }).then(r => r.json()).then(r => presentCategoryPairReport(r, true)).catch(console.error);
+            syncCategoryPairs([], true).catch(e => showEmailConsole('Sincronizare RO–EN — eroare', e.message, '#f87171'));
         });
-        function checkIdleCategoryPairs() {
+        async function checkIdleCategoryPairs() {
             if (tabs.some(t => t.type !== 'browser' && (t.filePath || t.fileName))) return;
-            if (categoryPairSyncPromise || _translatePollTimer) return;
+            if (categoryPairSyncPromise || _translatePollTimer || rssGenerating || document.hidden) return;
+            // cât timp fereastra cu propuneri e deschisă, nu o redesenez pe sub mâna utilizatorului
+            if (document.getElementById('categoryPairReport')) return;
+            // Verificarea completă durează ~25 s, deci nu o pornesc orbește: doar dacă s-a schimbat
+            // vreun fișier din Principal/ro sau /en (amprenta) sau, oricum, o dată la 10 minute.
+            const stamp = await getSiteStamp();
+            if (stamp && stamp === window.lastCategoryPairStamp && Date.now() - lastCategoryPairRun < 600000) return;
+            if (categoryPairSyncPromise) return;
             syncCategoryPairs().catch(console.error);
         }
-        setInterval(checkIdleCategoryPairs, 15000);
+        setInterval(checkIdleCategoryPairs, 10000);
         window.addEventListener('focus', checkIdleCategoryPairs);
 
         async function translateUntranslatedArticles() {
