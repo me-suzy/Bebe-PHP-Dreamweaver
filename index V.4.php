@@ -1090,6 +1090,17 @@ if (isset($_GET['action'])) {
             echo json_encode(['ok' => false, 'error' => 'Nu pot citi fisierul ' . $relative], JSON_UNESCAPED_UNICODE);
             exit;
         }
+        $updated = $raw;
+        $sourceCanonical = preg_match('/<link\b(?=[^>]*\brel\s*=\s*["\'][^"\']*\bcanonical\b[^"\']*["\'])[^>]*>/i', $updated, $sourceTag)
+            ? preg_match('/\bhref\s*=\s*["\']([^"\']+)["\']/i', $sourceTag[0], $sourceHref) : 0;
+        if ($sourceCanonical && !empty($sourceHref[1])) {
+            $sourceParts = @parse_url(html_entity_decode($sourceHref[1], ENT_QUOTES, 'UTF-8'));
+            $sourceName = basename(rawurldecode($sourceParts['path'] ?? ''));
+            if ($sourceName !== '' && strcasecmp($sourceName, $fileName) !== 0) {
+                $updated = str_ireplace($sourceName, $fileName, $updated);
+            }
+        }
+        $updated = preg_replace('/\.html(?:\.html)+/i', '.html', $updated);
         $canonicalUrl = 'https://neculaifantanaru.com/' . ($lang === 'en' ? 'en/' : '') . $fileName;
         $canonicalCount = 0;
         $canonicalHrefCount = 0;
@@ -1101,7 +1112,7 @@ if (isset($_GET['action'])) {
                         $canonicalHrefCount++;
                         return $h[1] . $h[2] . $canonicalUrl . $h[2];
                     }, $m[0], 1);
-            }, $raw);
+            }, $updated);
         if ($updated === null || $canonicalCount < 1 || $canonicalHrefCount < 1) {
             echo json_encode(['ok' => false, 'error' => 'Nu am gasit un canonical cu href care sa poata fi reparat.'], JSON_UNESCAPED_UNICODE);
             exit;
@@ -1145,6 +1156,100 @@ if (isset($_GET['action'])) {
         exit;
     }
 
+    // Indica daca un articol din limba cealalta trimite deja spre acest fisier prin FLAGS.
+    if ($action === 'articleFlagCounterpartCheck') {
+        $relative = trim((string) ($_GET['file'] ?? ''));
+        if (!preg_match('#^(ro|en)/([A-Za-z0-9._-]+\.html?)$#i', $relative, $m)) {
+            echo json_encode(['ok' => false, 'error' => 'Cale de articol invalida.'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        $lang = strtolower($m[1]);
+        $name = $m[2];
+        $other = $lang === 'ro' ? 'en' : 'ro';
+        $expectedPath = ($lang === 'en' ? '/en/' : '/') . $name;
+        $hostExpected = 'neculaifantanaru.com';
+        $hasCounterpart = false;
+        $flagName = 'flag_lang_' . $lang . '.';
+        foreach ((array) glob(resolve_path('Principal/' . $other, $ROOT) . '/*.html') as $candidate) {
+            $html = @file_get_contents($candidate);
+            if ($html === false || !preg_match('/<!--\s*FLAGS_1\s*-->([\s\S]*?)<!--\s*FLAGS\s*-->/i', $html, $section)) continue;
+            if (!preg_match_all('/<a\b([^>]*)>[\s\S]*?<img\b([^>]*)>/i', $section[1], $links, PREG_SET_ORDER)) continue;
+            foreach ($links as $link) {
+                if (!preg_match('/\bsrc\s*=\s*["\'][^"\']*' . preg_quote($flagName, '/') . '/i', $link[2])
+                    || !preg_match('/\bhref\s*=\s*["\']([^"\']+)["\']/i', $link[1], $href)) continue;
+                $parts = @parse_url(html_entity_decode($href[1], ENT_QUOTES, 'UTF-8'));
+                $host = strtolower($parts['host'] ?? '');
+                $path = rawurldecode($parts['path'] ?? '');
+                if (in_array($host, [$hostExpected, 'www.' . $hostExpected], true) && $path === $expectedPath) {
+                    $hasCounterpart = true;
+                    break 2;
+                }
+            }
+        }
+        echo json_encode(['ok' => true, 'hasCounterpart' => $hasCounterpart], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    // La pornire: detecteaza articole copiate/redenunite ale caror canonical/steag propriu
+    // indica inca articolul-sursa, dar al caror nume nou nu este referit de niciun steag opus.
+    if ($action === 'articleIdentityCandidates') {
+        @set_time_limit(300);
+        $hostExpected = 'neculaifantanaru.com';
+        $targets = ['ro' => [], 'en' => []];
+        foreach (['ro', 'en'] as $targetLang) {
+            $sourceLang = $targetLang === 'ro' ? 'en' : 'ro';
+            foreach ((array) glob(resolve_path('Principal/' . $sourceLang, $ROOT) . '/*.html') as $sourceFile) {
+                $html = @file_get_contents($sourceFile);
+                if ($html === false || !preg_match('/<!--\s*FLAGS_1\s*-->([\s\S]*?)<!--\s*FLAGS\s*-->/i', $html, $section)) continue;
+                if (!preg_match_all('/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/i', $section[1], $anchors, PREG_SET_ORDER)) continue;
+                foreach ($anchors as $anchor) {
+                    if (!preg_match('/<img\b([^>]*)>/i', $anchor[2], $img)
+                        || !preg_match('/\bsrc\s*=\s*["\'][^"\']*flag_lang_' . preg_quote($targetLang, '/') . '\.[^"\']*["\']/i', $img[1])
+                        || !preg_match('/\bhref\s*=\s*["\']([^"\']+)["\']/i', $anchor[1], $href)) continue;
+                    $parts = @parse_url(html_entity_decode($href[1], ENT_QUOTES, 'UTF-8'));
+                    $host = strtolower($parts['host'] ?? '');
+                    if ($host === 'www.' . $hostExpected) $host = $hostExpected;
+                    $path = rawurldecode($parts['path'] ?? '');
+                    if ($host === $hostExpected && $path !== '') $targets[$targetLang][$path] = true;
+                }
+            }
+        }
+        $candidates = [];
+        foreach (['ro', 'en'] as $lang) {
+            $dir = resolve_path('Principal/' . $lang, $ROOT);
+            foreach ((array) glob($dir . '/*.html') as $file) {
+                $html = @file_get_contents($file);
+                if ($html === false) continue;
+                $name = basename($file);
+                $expectedPath = ($lang === 'en' ? '/en/' : '/') . $name;
+                $canonicalHref = '';
+                if (preg_match('/<link\b(?=[^>]*\brel\s*=\s*["\'][^"\']*\bcanonical\b[^"\']*["\'])[^>]*>/i', $html, $canonicalTag)
+                    && preg_match('/\bhref\s*=\s*["\']([^"\']+)["\']/i', $canonicalTag[0], $href)) $canonicalHref = $href[1];
+                $canonicalParts = $canonicalHref !== '' ? @parse_url(html_entity_decode($canonicalHref, ENT_QUOTES, 'UTF-8')) : [];
+                $canonicalHost = strtolower($canonicalParts['host'] ?? '');
+                if ($canonicalHost === 'www.' . $hostExpected) $canonicalHost = $hostExpected;
+                $canonicalOk = $canonicalHost === $hostExpected && rawurldecode($canonicalParts['path'] ?? '') === $expectedPath;
+                $selfFlagOk = false;
+                if (preg_match('/<!--\s*FLAGS_1\s*-->([\s\S]*?)<!--\s*FLAGS\s*-->/i', $html, $section)
+                    && preg_match_all('/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/i', $section[1], $anchors, PREG_SET_ORDER)) {
+                    foreach ($anchors as $anchor) {
+                        if (!preg_match('/<img\b([^>]*)>/i', $anchor[2], $img)
+                            || !preg_match('/\bsrc\s*=\s*["\'][^"\']*flag_lang_' . preg_quote($lang, '/') . '\.[^"\']*["\']/i', $img[1])
+                            || !preg_match('/\bhref\s*=\s*["\']([^"\']+)["\']/i', $anchor[1], $href)) continue;
+                        $parts = @parse_url(html_entity_decode($href[1], ENT_QUOTES, 'UTF-8'));
+                        $host = strtolower($parts['host'] ?? '');
+                        if ($host === 'www.' . $hostExpected) $host = $hostExpected;
+                        if ($host === $hostExpected && rawurldecode($parts['path'] ?? '') === $expectedPath) { $selfFlagOk = true; break; }
+                    }
+                }
+                if ($canonicalOk && $selfFlagOk) continue;
+                if (isset($targets[$lang][$expectedPath])) continue;
+                $candidates[] = ['file' => $lang . '/' . $name, 'lang' => $lang, 'name' => $name,
+                    'canonicalWrong' => !$canonicalOk, 'selfFlagWrong' => !$selfFlagOk];
+            }
+        }
+        echo json_encode(['ok' => true, 'candidates' => $candidates], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
     if ($action === 'categoryPairSync') {
         ini_set('display_errors', '0');
         @set_time_limit(600);
@@ -1211,12 +1316,9 @@ if (isset($_GET['action'])) {
             @set_time_limit(120);
             try {
                 require_once __DIR__ . '/translation-cache.php';
-                $pending = json_decode(@file_get_contents(__DIR__ . '/translation-publication.json'), true);
-                if (is_array($pending) && empty($pending['complete'])) {
-                    $result = ['ok'=>true, 'done'=>true, 'resume'=>true, 'files'=>$pending['articles'] ?? [], 'next'=>0, 'total'=>0, 'translated'=>0];
-                } else {
-                    $result = translation_cache_step(max(0, (int) ($_GET['cursor'] ?? 0)));
-                }
+                // Always scan the current RO files. A saved publication may belong to an older
+                // run and must never replace the current list of untranslated articles.
+                $result = translation_cache_step(max(0, (int) ($_GET['cursor'] ?? 0)));
                 $result['running'] = $isRunning();
                 echo json_encode($result, JSON_UNESCAPED_UNICODE);
             } catch (Throwable $e) {
@@ -1228,6 +1330,22 @@ if (isset($_GET['action'])) {
         if ($action === 'translateSiteStart' && $_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($isRunning()) {
                 echo json_encode(['ok' => false, 'error' => 'Traducerea ruleaza deja.', 'running' => true], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            $requestedFiles = json_decode((string) ($_POST['files'] ?? ''), true);
+            if (!is_array($requestedFiles)) $requestedFiles = [];
+            $requestedFiles = array_values(array_unique(array_filter($requestedFiles, function ($name) {
+                return is_string($name) && preg_match('/^[A-Za-z0-9._-]+\.html?$/i', $name);
+            })));
+            if (!$requestedFiles) {
+                echo json_encode(['ok' => false, 'error' => 'Lista articolelor confirmate lipseste. Refa verificarea Translate.'], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            $requestPath = __DIR__ . '/translation-request.json';
+            $requestJson = json_encode(['files' => $requestedFiles, 'createdAt' => time()], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+            if ($requestJson === false || @file_put_contents($requestPath . '.tmp', $requestJson, LOCK_EX) === false || !@rename($requestPath . '.tmp', $requestPath)) {
+                @unlink($requestPath . '.tmp');
+                echo json_encode(['ok' => false, 'error' => 'Nu pot salva lista confirmata pentru traducere.'], JSON_UNESCAPED_UNICODE);
                 exit;
             }
             @file_put_contents($ttLog, "Pornesc scriptul...\n");
@@ -6454,6 +6572,8 @@ if (isset($_GET['action'])) {
         // Verificare completă: toate grupurile de articole cu aceeași dată, pe fiecare limbă
         let dateDupFullBusy = false;
         let dateDupLastAutomaticSignature = null;
+        window.articleStartupChecksReady = false;
+        window.articleStartupCheckPromise = null;
 
         // Jurnalul verificărilor (verificari-log.txt, lângă editor): același fișier ca verificarea RO–EN
         function appendCheckLog(lines) {
@@ -6488,10 +6608,13 @@ if (isset($_GET['action'])) {
             return set;
         }
 
-        async function runFullDateDuplicateCheck(manual) {
-            if (postponeValidation('all-dates', () => runFullDateDuplicateCheck(manual))) return;
+        async function runFullDateDuplicateCheck(manual, startupStage) {
+            const newArticleFlow = window.newArticleIdentityWorkflow;
+            // Fluxul unui articol nou isi ruleaza separat verificarile la +1 si +2 minute.
+            if ((newArticleFlow && !startupStage) || (!window.articleStartupChecksReady && !startupStage)) return;
+            if (postponeValidation('all-dates', () => runFullDateDuplicateCheck(manual, startupStage))) return;
             if (dateDupFullBusy) return;
-            if (!manual && !tabs.some(t => t.filePath && t.type !== 'browser')) {
+            if (!manual && !startupStage && !tabs.some(t => t.filePath && t.type !== 'browser')) {
                 // Prioritate: întâi verificarea RO–EN (poate repara singură data). Dacă rulează sau dacă
                 // site-ul s-a schimbat de la ultima ei rulare, o las pe ea întâi; ea pornește apoi și verificarea asta.
                 if (typeof syncCategoryPairs === 'function' && typeof getSiteStamp === 'function') {
@@ -6531,7 +6654,8 @@ if (isset($_GET['action'])) {
             }
             // Automat (la pornire): lista mare apare doar dacă nu e deschis niciun HTML.
             // Cu un fișier deschis, apare doar fereastra mică, după ce îi schimbi data.
-            if (postponeValidation('all-dates', () => runFullDateDuplicateCheck(manual))) return;
+            if (postponeValidation('all-dates', () => runFullDateDuplicateCheck(manual, startupStage))) return;
+            if ((window.newArticleIdentityWorkflow && !startupStage) || (!window.articleStartupChecksReady && !startupStage)) return;
             logDateDupGroups(sections);
             const signature = JSON.stringify(sections);
             if (!manual && signature === dateDupLastAutomaticSignature) return;
@@ -6547,6 +6671,9 @@ if (isset($_GET['action'])) {
         // silent: fără mesaj când data e unică (verificarea de la deschiderea fișierului)
         // force: verifică și un articol încă neadăugat în nicio categorie (folosit după Save)
         async function runCurrentDateDuplicateCheck(onlyPath, silent, force) {
+            const newArticleFlow = window.newArticleIdentityWorkflow;
+            if (newArticleFlow && dateDupNormPath(newArticleFlow.filePath) === dateDupNormPath(currentFile)
+                && (!force || Date.now() < newArticleFlow.dateCheckAt)) return;
             if (postponeValidation('current-date', () => runCurrentDateDuplicateCheck(null, true, force))) return;
             if (!editor || !currentFile) return;
             if (onlyPath && dateDupNormPath(onlyPath) !== dateDupNormPath(currentFile)) return;
@@ -6569,16 +6696,22 @@ if (isset($_GET['action'])) {
                 if (!silent) toast('Data „' + cur.text.replace(/^On\s+/i, '') + '” nu mai apare în alt articol.');
                 return;
             }
-            // O copie noua pastreaza slugul paginii-sursa in canonical, FLAGS si JSON-LD.
-            // Dupa confirmarea datei duplicate, aliniem toate aparitiile la numele fisierului.
-            const identityFix = repairCopiedArticleIdentity(editor.getValue(), currentFile);
+            const activeBeforeRepair = tabs.find(t => t.id === activeTabId);
+            const sourceSnapshot = editor.getValue();
+            const identityFix = activeBeforeRepair && activeBeforeRepair._newCopyIdentityChecked
+                ? { changed: false }
+                : await repairNewUnpairedArticleIdentity(sourceSnapshot, currentFile, data);
+            if (dateDupNormPath(currentFile) !== me || editor.getValue() !== sourceSnapshot) return;
             if (identityFix.changed) {
                 editor.setValue(identityFix.html);
-                const active = tabs.find(t => t.id === activeTabId);
-                if (active) active._identityRepairNotice = identityFix.message;
+                const active = activeBeforeRepair;
+                if (active) {
+                    active._identityRepairNotice = identityFix.message;
+                    active._newCopyIdentityChecked = true;
+                }
             }
-            const used = new Set(others.map(a => a.key));
             const mine = data.items.find(a => dateDupNormPath(a.file) === me);
+            const used = new Set(others.map(a => a.key));
             const meEntry = { file: currentFile, key: cur.key, date: cur.text, cat: mine ? mine.cat : '', catName: mine ? mine.catName : '', current: true };
             showDateDuplicatesDialog([{
                 lang: data.lang, dir,
@@ -6593,7 +6726,9 @@ if (isset($_GET['action'])) {
         function repairCopiedArticleIdentity(source, filePath) {
             const site = /\/Principal\/(ro|en)\/([^/]+\.html?)$/i.exec(String(filePath || '').replace(/\\/g, '/'));
             if (!site) return { html: source, changed: false, message: '' };
+            const lang = site[1].toLowerCase();
             const fileName = site[2];
+            const selfUrl = 'https://neculaifantanaru.com/' + (lang === 'en' ? 'en/' : '') + fileName;
             let html = String(source || '');
             const link = html.match(/<link\b[^>]*\brel\s*=\s*["']canonical["'][^>]*>/i);
             const hrefMatch = link && link[0].match(/\bhref\s*=\s*["']([^"']+)["']/i);
@@ -6610,20 +6745,68 @@ if (isset($_GET['action'])) {
                 re.lastIndex = 0;
                 html = html.replace(re, fileName);
             }
+            let canonicalChanged = false;
+            html = html.replace(/<link\b(?=[^>]*\brel\s*=\s*["'][^"']*\bcanonical\b[^"']*["'])[^>]*>/i, tag => {
+                const fixed = tag.replace(/(\bhref\s*=\s*)(["'])(.*?)\2/i, (all, before, quote, value) => before + quote + selfUrl + quote);
+                canonicalChanged = fixed !== tag;
+                return fixed;
+            });
+            let selfFlagChanged = false;
+            html = html.replace(/(<!--\s*FLAGS_1\s*-->)([\s\S]*?)(<!--\s*FLAGS\s*-->)/i, (all, start, body, end) => {
+                const fixedBody = body.replace(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi, anchor => {
+                    const img = /<img\b[^>]*>/i.exec(anchor);
+                    if (!img || !new RegExp('flag_lang_' + lang + '\\.', 'i').test(img[0])) return anchor;
+                    const fixed = anchor.replace(/(\bhref\s*=\s*)(["'])(.*?)\2/i, (allHref, before, quote, value) => before + quote + selfUrl + quote);
+                    if (fixed !== anchor) selfFlagChanged = true;
+                    return fixed;
+                });
+                return start + fixedBody + end;
+            });
             const beforeExtensionFix = html;
             html = html.replace(/\.html(?:\.html)+/gi, '.html');
             const extensionFixed = html !== beforeExtensionFix;
             const changed = html !== source;
             const items = [];
             if (replacedSlug) items.push('slugul vechi a fost inlocuit cu ' + fileName + ' peste tot (canonical si FLAGS incluse)');
+            if (canonicalChanged) items.push('canonicalul a fost aliniat la numele fisierului');
+            if (selfFlagChanged) items.push('steagul ' + lang.toUpperCase() + ' a fost aliniat la numele fisierului');
             if (extensionFixed) items.push('extensiile .html.html au fost corectate');
             return { html, changed, message: changed ? 'Identitate sincronizata automat: ' + items.join('; ') + '. Salveaza cu Ctrl+S.' : '' };
+        }
+
+        async function repairNewUnpairedArticleIdentity(source, filePath, knownData) {
+            const location = /\/Principal\/(ro|en)\/([^/]+\.html?)$/i.exec(String(filePath || '').replace(/\\/g, '/'));
+            const currentDate = dateDupParseArticleDate(source);
+            const dir = dateDupDirOfFile(filePath);
+            if (!location || !currentDate || !dir) return { html: source, changed: false, message: '' };
+            let data = knownData;
+            if (!data) {
+                try { data = await dateDupFetchDir(dir); }
+                catch (_) { return { html: source, changed: false, message: '', checked: false }; }
+            }
+            const me = dateDupNormPath(filePath);
+            const mine = data.items.find(a => dateDupNormPath(a.file) === me);
+            const duplicates = data.items.filter(a => (a.listed || a.cat) && dateDupNormPath(a.file) !== me && a.key === currentDate.key);
+            if (!mine || !duplicates.length) return { html: source, changed: false, message: '' };
+            const newest = duplicates.every(a => Number(mine.created) > Number(a.created)
+                || (Number(mine.created) === Number(a.created) && Number(mine.mtime) > Number(a.mtime)));
+            if (!newest) return { html: source, changed: false, message: '' };
+            const relative = location[1].toLowerCase() + '/' + location[2];
+            try {
+                const response = await fetch('?action=articleFlagCounterpartCheck&file=' + encodeURIComponent(relative), { cache: 'no-store' });
+                const counterpart = await response.json();
+                if (!response.ok || !counterpart.ok) return { html: source, changed: false, message: '', checked: false };
+                if (counterpart.hasCounterpart) return { html: source, changed: false, message: '' };
+            } catch (_) { return { html: source, changed: false, message: '', checked: false }; }
+            return repairCopiedArticleIdentity(source, filePath);
         }
 
         function noteEditorChangeForDateCheck() {
             if (!editor || !activeTabId || !currentFile || !dateDupDirOfFile(currentFile)) return;
             const tab = tabs.find(t => t.id === activeTabId);
             if (!tab) return;
+            const newArticleFlow = window.newArticleIdentityWorkflow;
+            if (newArticleFlow && dateDupNormPath(newArticleFlow.filePath) === dateDupNormPath(currentFile)) return;
             const cur = dateDupParseArticleDate(editor.getValue());
             const k = cur ? cur.key : null;
             const path = currentFile;
@@ -6778,8 +6961,8 @@ if (isset($_GET['action'])) {
                     }
                 } else {
                     const tf = g.files.find(x => dateDupNormPath(x.file) === dateDupNormPath(g.target));
+                    box.remove();
                     ok = await applyDateToFileOnDisk(g.target, tf ? tf.date : '', tf ? tf.cat : '', parsed.text);
-                    if (ok) runFullDateDuplicateCheck(true); // din nou verificarea normală: poate data ta se repetă
                 }
                 if (!ok) { add.disabled = false; input.disabled = false; add.style.opacity = ''; }
             };
@@ -6841,6 +7024,18 @@ if (isset($_GET['action'])) {
         function closeDateDuplicatesDialog(which) {
             if (which !== 'file') { const a = document.getElementById('dateDuplicatesDialog'); if (a) a.remove(); }
             if (which !== 'all') { const f = document.getElementById('dateDupFileDialog'); if (f) f.remove(); }
+            flushPendingCategoryPairReport();
+        }
+
+        function flushPendingCategoryPairReport() {
+            const pending = window.pendingStartupCategoryPairReport;
+            if (!pending || document.getElementById('dateDuplicatesDialog') || document.getElementById('dateDupFileDialog')) return;
+            window.pendingStartupCategoryPairReport = null;
+            if (window.pendingCategoryPairObserver) {
+                window.pendingCategoryPairObserver.disconnect();
+                window.pendingCategoryPairObserver = null;
+            }
+            setTimeout(() => presentCategoryPairReport(pending.result, pending.force), 0);
         }
 
         // opts (opțional): { id, title, recheck } — folosit și de fereastra Link-Duble
@@ -6902,7 +7097,7 @@ if (isset($_GET['action'])) {
             close.textContent = '×';
             close.title = 'Închide';
             close.style.cssText = 'padding:2px 10px;font-size:18px';
-            close.onclick = () => box.remove();
+            close.onclick = () => { box.remove(); flushPendingCategoryPairReport(); };
             head.appendChild(recheck);
             head.appendChild(close);
             box.appendChild(head);
@@ -7041,9 +7236,9 @@ if (isset($_GET['action'])) {
                                     const tf = g.files.find(x => dateDupNormPath(x.file) === dateDupNormPath(g.target));
                                     chip.disabled = true;
                                     chip.style.opacity = '.6';
+                                    box.remove();
                                     const ok = await applyDateToFileOnDisk(g.target, tf ? tf.date : '', tf ? tf.cat : '', a);
-                                    if (ok) runFullDateDuplicateCheck(true);
-                                    else { chip.disabled = false; chip.style.opacity = ''; }
+                                    if (!ok) { chip.disabled = false; chip.style.opacity = ''; }
                                 };
                             } else {
                                 chip.title = 'Click = copiază data';
@@ -7133,7 +7328,185 @@ if (isset($_GET['action'])) {
         }
 
         // La pornire: verificare completă imediat (scanarea vine din cache, durează ~1 s)
-        setTimeout(() => { runFullDateDuplicateCheck(false).catch(() => { }); }, 0);
+        const PENDING_RO_TRANSLATIONS_KEY = 'htmlEditorPendingRoTranslationsV1';
+        function readPendingRoTranslations() {
+            try {
+                const value = JSON.parse(localStorage.getItem(PENDING_RO_TRANSLATIONS_KEY) || '{}');
+                return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+            } catch (_) { return {}; }
+        }
+        function writePendingRoTranslations(value) {
+            try { localStorage.setItem(PENDING_RO_TRANSLATIONS_KEY, JSON.stringify(value || {})); } catch (_) { }
+        }
+        function registerPendingRoTranslations(files, detectedAt) {
+            const pending = readPendingRoTranslations();
+            for (const value of files || []) {
+                const file = String(value).replace(/\\/g, '/').toLowerCase();
+                if (!file.startsWith('ro/')) continue;
+                if (!pending[file]) pending[file] = { file, detectedAt: detectedAt || Date.now(), reminderShownAt: 0 };
+            }
+            writePendingRoTranslations(pending);
+        }
+        async function registerUnpairedRoFlagsFromIssues(result) {
+            const candidates = [];
+            let registered = false;
+            for (const issue of (result && result.issues) || []) {
+                if (!/^FLAGS\s+RO\s+diferite:/i.test(String(issue))) continue;
+                const match = String(issue).match(/\bro\/([A-Za-z0-9._-]+\.html?)\b/i);
+                if (match) candidates.push('ro/' + match[1]);
+            }
+            for (const file of candidates) {
+                try {
+                    const response = await fetch('?action=articleFlagCounterpartCheck&file=' + encodeURIComponent(file), { cache: 'no-store' });
+                    const result = await response.json();
+                    if (response.ok && result.ok && !result.hasCounterpart) {
+                        registerPendingRoTranslations([file]);
+                        registered = true;
+                    }
+                } catch (_) { }
+            }
+            if (registered) schedulePendingRoTranslationReview();
+        }
+        async function refreshPendingRoTranslations() {
+            const pending = readPendingRoTranslations();
+            let changed = false;
+            for (const key of Object.keys(pending)) {
+                try {
+                    const response = await fetch('?action=articleFlagCounterpartCheck&file=' + encodeURIComponent(pending[key].file), { cache: 'no-store' });
+                    const result = await response.json();
+                    if (response.ok && result.ok && result.hasCounterpart) { delete pending[key]; changed = true; }
+                } catch (_) { }
+            }
+            if (changed) writePendingRoTranslations(pending);
+            return pending;
+        }
+        function schedulePendingRoTranslationReview() {
+            clearTimeout(window.pendingRoTranslationReviewTimer);
+            if (!window.articleStartupChecksReady) {
+                window.pendingRoTranslationReviewTimer = setTimeout(schedulePendingRoTranslationReview, 1000);
+                return;
+            }
+            const pending = readPendingRoTranslations();
+            const times = Object.values(pending).filter(item => !item.reminderShownAt)
+                .map(item => Number(item.detectedAt || Date.now()) + 2 * 60 * 60 * 1000);
+            if (!times.length) return;
+            const dueAt = Math.min(...times);
+            window.pendingRoTranslationReviewTimer = setTimeout(async () => {
+                await refreshPendingRoTranslations();
+                const latest = readPendingRoTranslations();
+                const now = Date.now();
+                let dueMissing = false;
+                for (const item of Object.values(latest)) {
+                    if (!item.reminderShownAt && Number(item.detectedAt || now) + 2 * 60 * 60 * 1000 <= now) {
+                        dueMissing = true;
+                    }
+                }
+                if (dueMissing) {
+                    try { await syncCategoryPairs([], true); }
+                    catch (error) { showEmailConsole('Verificarea versiunii EN - eroare', error.message, '#f87171'); }
+                }
+                schedulePendingRoTranslationReview();
+            }, Math.max(0, dueAt - Date.now()));
+        }
+
+        async function scanAndRepairNewArticleIdentities() {
+            const response = await fetch('?action=articleIdentityCandidates', { cache: 'no-store' });
+            const scan = await response.json();
+            if (!response.ok || !scan.ok) throw new Error(scan.error || ('HTTP ' + response.status));
+            let repaired = 0;
+            const repairedFiles = [];
+            for (const candidate of (scan.candidates || [])) {
+                const openTab = findTabByPath('e:/Carte/BB/17 - Site Leadership/Principal/' + candidate.file);
+                if (openTab && openTab.isDirty) continue;
+                const body = new URLSearchParams({ file: candidate.file, flagLang: candidate.lang, flagTarget: candidate.name });
+                const fixResponse = await fetch('?action=repairArticleIdentity', { method: 'POST', body });
+                const result = await fixResponse.json();
+                if (!fixResponse.ok || !result.ok) {
+                    console.warn('Nu s-a putut repara identitatea articolului ' + candidate.file + ': ' + (result.error || fixResponse.status));
+                    continue;
+                }
+                if (result.changed) { repaired++; repairedFiles.push(candidate.file.toLowerCase()); }
+            }
+            return { count: repaired, files: repairedFiles };
+        }
+
+        function showNewArticleIdentityNotice(files) {
+            const names = (files || []).map(file => String(file).replace(/\\/g, '/').split('/').pop());
+            if (!names.length) return Promise.resolve();
+            return new Promise(resolve => {
+                const dialog = document.createElement('dialog');
+                dialog.id = 'newArticleIdentityNotice';
+                dialog.style.cssText = 'width:min(560px,calc(100vw - 32px));border:1px solid #4b6b91;border-radius:14px;padding:0;background:#202532;color:#f1f5f9;box-shadow:0 20px 60px #0009;font:16px/1.55 system-ui';
+                const heading = document.createElement('h2');
+                heading.textContent = names.length === 1 ? 'Articol nou găsit' : 'Articole noi găsite';
+                heading.style.cssText = 'margin:0;padding:18px 22px;border-bottom:1px solid #374151;font-size:19px';
+                const body = document.createElement('div');
+                body.style.cssText = 'padding:20px 22px;color:#e5e7eb';
+                const message = document.createElement('p');
+                message.style.margin = '0';
+                message.textContent = (names.length === 1
+                    ? 'Articolul nou „' + names[0] + '” a fost găsit'
+                    : 'Articolele noi „' + names.join('”, „') + '” au fost găsite')
+                    + ' și s-au făcut înlocuirile pentru canonical și flags.';
+                body.appendChild(message);
+                const actions = document.createElement('div');
+                actions.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;padding:0 22px 18px';
+                let finished = false;
+                const finish = () => {
+                    if (finished) return;
+                    finished = true;
+                    if (dialog.open) dialog.close();
+                    dialog.remove();
+                    resolve();
+                };
+                for (const label of ['OK', 'Close']) {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.textContent = label;
+                    button.style.cssText = 'min-width:86px;padding:8px 16px;border:1px solid #536480;border-radius:8px;background:' + (label === 'OK' ? '#166534' : '#30394b') + ';color:#fff;font:600 14px system-ui;cursor:pointer';
+                    button.addEventListener('click', finish);
+                    actions.appendChild(button);
+                }
+                dialog.addEventListener('cancel', event => { event.preventDefault(); finish(); });
+                dialog.addEventListener('close', finish, { once: true });
+                dialog.append(heading, body, actions);
+                document.body.appendChild(dialog);
+                dialog.showModal();
+                actions.querySelector('button').focus();
+            });
+        }
+
+        async function runStartupArticleWorkflow() {
+            let scanResult = { count: 0, files: [] };
+            try { scanResult = await scanAndRepairNewArticleIdentities(); }
+            catch (error) { console.error('Verificarea initiala a identitatii articolelor a esuat:', error); }
+            if (scanResult.count) registerPendingRoTranslations(scanResult.files);
+            if (scanResult.count) await showNewArticleIdentityNotice(scanResult.files);
+            const now = Date.now();
+            const dateDelay = scanResult.count ? 30000 : 0;
+            const flow = window.newArticleIdentityWorkflow = {
+                filePath: null,
+                newFiles: scanResult.files,
+                dateCheckAt: now + dateDelay,
+                pairCheckAt: now + dateDelay + 60000
+            };
+            flow.dateTimer = setTimeout(async () => {
+                try { await runFullDateDuplicateCheck(false, true); }
+                catch (error) { console.error('Verificarea initiala a datelor duplicate a esuat:', error); }
+            }, dateDelay);
+            flow.pairTimer = setTimeout(async () => {
+                window.articleStartupChecksReady = true;
+                try { await syncCategoryPairs([], true); }
+                catch (error) { showEmailConsole('Sincronizare RO-EN - eroare', error.message, '#f87171'); }
+                finally {
+                    if (window.newArticleIdentityWorkflow === flow) window.newArticleIdentityWorkflow = null;
+                    schedulePendingRoTranslationReview();
+                }
+            }, dateDelay + 60000);
+        }
+
+        // Identitatea se verifica inaintea ferestrelor pentru date si corespondente.
+        window.articleStartupCheckPromise = new Promise(resolve => setTimeout(resolve, 0)).then(runStartupArticleWorkflow);
 
         // Discover files copied into RO/EN while the start screen stays open.
         setInterval(() => {
@@ -7283,8 +7656,25 @@ if (isset($_GET['action'])) {
         async function checkArticleIdentity(tab, closing = false) {
             if (postponeValidation('canonical-' + (tab && tab.id), () => checkArticleIdentity(tab))) return true;
             if (!tab || tab.type === 'browser' || !tab.filePath) return true;
-            const source = tab.id === activeTabId && editor ? editor.getValue() : tab.editorContent;
-            const issues = articleIdentityIssues(source || '', tab.filePath);
+            let source = tab.id === activeTabId && editor ? editor.getValue() : tab.editorContent;
+            let issues = articleIdentityIssues(source || '', tab.filePath);
+            if (issues.length && !tab._newCopyIdentityChecked) {
+                try {
+                    const sourceSnapshot = source || '';
+                    const identityFix = await repairNewUnpairedArticleIdentity(sourceSnapshot, tab.filePath);
+                    tab._newCopyIdentityChecked = identityFix.checked !== false;
+                    const latestSource = tab.id === activeTabId && editor ? editor.getValue() : tab.editorContent;
+                    if (identityFix.changed && latestSource === sourceSnapshot) {
+                        tab._identityRepairNotice = identityFix.message;
+                        tab.editorContent = identityFix.html;
+                        if (tab.id === activeTabId && editor) editor.setValue(identityFix.html);
+                        else { tab.isDirty = true; updateTabPresentation(tab); }
+                        source = identityFix.html;
+                    }
+                    else source = latestSource;
+                    issues = articleIdentityIssues(source || '', tab.filePath);
+                } catch (_) { /* Keep the normal canonical warning if automatic classification fails. */ }
+            }
             if (!issues.length) return true;
             const task = async () => {
                 if (!tabs.includes(tab)) return true;
@@ -9000,6 +9390,65 @@ if (isset($_GET['action'])) {
             box.querySelector('button').focus();
         }
 
+        async function prepareNewArticleIdentity(path, source) {
+            const match = /\/Principal\/(ro|en)\/([^/]+\.html?)$/i.exec(String(path || '').replace(/\\/g, '/'));
+            if (!match) return { content: source, repaired: false };
+            const lang = match[1].toLowerCase();
+            const fileName = match[2];
+            const relative = lang + '/' + fileName;
+            try {
+                // Prima verificare: cauta numele nou in steagurile tuturor articolelor din limba opusa.
+                const checkResponse = await fetch('?action=articleFlagCounterpartCheck&file=' + encodeURIComponent(relative), { cache: 'no-store' });
+                const counterpart = await checkResponse.json();
+                if (!checkResponse.ok || !counterpart.ok || counterpart.hasCounterpart) return { content: source, repaired: false };
+                const fix = repairCopiedArticleIdentity(source, path);
+                if (!fix.changed) return { content: source, repaired: false };
+                const body = new URLSearchParams({ file: relative, flagLang: lang, flagTarget: fileName });
+                const repairResponse = await fetch('?action=repairArticleIdentity', { method: 'POST', body });
+                const result = await repairResponse.json();
+                if (!repairResponse.ok || !result.ok) throw new Error(result.error || ('HTTP ' + repairResponse.status));
+                const freshResponse = await fetch('?action=load&file=' + encodeURIComponent(path), { cache: 'no-store' });
+                const fresh = await freshResponse.json();
+                if (!freshResponse.ok || !fresh.ok) throw new Error(fresh.error || 'Fisierul reparat nu a putut fi reincarcat.');
+                const now = Date.now();
+                window.newArticleIdentityWorkflow = { filePath: fresh.file || path, newFiles: [relative.toLowerCase()], dateCheckAt: now + 30000, pairCheckAt: now + 90000 };
+                if (lang === 'ro') {
+                    registerPendingRoTranslations([relative]);
+                    schedulePendingRoTranslationReview();
+                }
+                closeDateDuplicatesDialog('all');
+                const oldPairReport = document.getElementById('categoryPairReport');
+                if (oldPairReport) oldPairReport.remove();
+                toast('In Noul fisier au fost inlocuite canonical si flags');
+                return { content: fresh.content, repaired: true, message: 'Canonicalul si steagul propriu au fost inlocuite automat.' };
+            } catch (error) {
+                console.error('Verificarea identitatii articolului nou:', error);
+                return { content: source, repaired: false };
+            }
+        }
+
+        function scheduleNewArticleFollowup(tab, filePath) {
+            const flow = window.newArticleIdentityWorkflow;
+            if (!flow || dateDupNormPath(flow.filePath) !== dateDupNormPath(filePath)) return;
+            clearTimeout(flow.dateTimer);
+            clearTimeout(flow.pairTimer);
+            flow.dateTimer = setTimeout(async () => {
+                if (!tabs.includes(tab) || dateDupNormPath(currentFile) !== dateDupNormPath(filePath)) return;
+                await runCurrentDateDuplicateCheck(filePath, true, true);
+            }, Math.max(0, flow.dateCheckAt - Date.now()));
+            flow.pairTimer = setTimeout(async () => {
+                try {
+                    if (categoryPairSyncPromise) {
+                        try { await categoryPairSyncPromise; } catch (_) { }
+                        await new Promise(resolve => setTimeout(resolve, 0));
+                    }
+                    await syncCategoryPairs([], true);
+                } finally {
+                    if (window.newArticleIdentityWorkflow === flow) window.newArticleIdentityWorkflow = null;
+                }
+            }, Math.max(0, flow.pairCheckAt - Date.now()));
+        }
+
         async function openFile(path, el) {
             // Lista mare cu toate datele duplicate e doar pentru pornire (fără HTML deschis);
             // rămâne deschisă doar când fișierul e deschis chiar din link-ul ei.
@@ -9016,10 +9465,13 @@ if (isset($_GET['action'])) {
                 return;
             }
             try {
+                if (window.articleStartupCheckPromise) await window.articleStartupCheckPromise;
                 toast('Se deschide...');
                 const res = await fetch('?action=load&file=' + encodeURIComponent(path));
                 const data = await res.json();
                 if (!data.ok) { toast('Eroare: ' + data.error); return; }
+                const prepared = await prepareNewArticleIdentity(data.file || path, data.content);
+                data.content = prepared.content;
 
                 // Close browser panel if open (switching to a file tab)
                 if (browserPanelOpen) {
@@ -9048,6 +9500,10 @@ if (isset($_GET['action'])) {
                     viewMode: 'design',
                     lastPreviewHadBody: /<body\b/i.test(data.content)
                 });
+                if (prepared.repaired) {
+                    tab._newCopyIdentityChecked = true;
+                    tab._identityRepairNotice = prepared.message;
+                }
                 tabs.push(tab);
                     setTimeout(() => checkArticleIdentity(tab), 0);
                     scheduleIndexOrderCheck();
@@ -9082,6 +9538,7 @@ if (isset($_GET['action'])) {
                 try {
                     await reconcileLinkedCategoryTeaserWithArticle(tab, tab.editorContent, { context: 'open', silent: true });
                 } catch (eSync) { console.error(eSync); }
+                if (prepared.repaired) scheduleNewArticleFollowup(tab, data.file || path);
             } catch (e) {
                 toast('Eroare la deschidere: ' + e.message);
             }
@@ -11435,14 +11892,14 @@ if (isset($_GET['action'])) {
                     '<div style="width:min(560px,calc(100% - 32px));background:#1f2330;border:1px solid #3a4152;border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.6);font-family:Segoe UI,Arial,sans-serif;overflow:hidden">' +
                     '<div style="display:flex;align-items:center;gap:12px;padding:18px 22px 6px">' +
                     '<span style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:50%;background:rgba(8,145,178,.18);font-size:20px">🌐</span>' +
-                    '<b style="color:#f1f5f9;font-size:19px">Traduc ' + files.length + (files.length === 1 ? ' articol' : ' articole') + ' în engleză?</b></div>' +
-                    '<div style="padding:8px 22px 4px;color:#94a3b8;font-size:14px">Articole din <code style="color:#cbd5e1">ro/</code> netraduse în <code style="color:#cbd5e1">en/</code>:</div>' +
+                    '<b style="color:#f1f5f9;font-size:19px">Am găsit ' + files.length + (files.length === 1 ? ' articol netradus' : ' articole netraduse') + '.</b></div>' +
+                    '<div style="padding:8px 22px 4px;color:#94a3b8;font-size:14px">Pornești traducerea în engleză pentru:</div>' +
                     '<div style="margin:10px 22px 4px;padding:12px 16px;max-height:240px;overflow:auto;background:#161a24;border:1px solid #2f3646;border-left:4px solid #0891b2;border-radius:8px;color:#e2e8f0;font:14px/1.7 Consolas,monospace">' +
                     files.map(function (f) { return esc(f); }).join('<br>') + '</div>' +
                     '<div style="padding:10px 22px 0;color:#94a3b8;font-size:13px">Backup, traducere, Pasul 0–5, apoi fișierele ajung în <code style="color:#cbd5e1">c:\\Folder1\\fisiere_html</code> (golit înainte de Pasul 5).</div>' +
                     '<div style="display:flex;justify-content:flex-end;gap:10px;padding:18px 22px 20px">' +
                     '<button type="button" class="tcf-cancel" style="padding:9px 20px;border-radius:8px;border:1px solid #475066;background:transparent;color:#e2e8f0;font-size:15px;cursor:pointer">Anulează</button>' +
-                    '<button type="button" class="tcf-ok" style="padding:9px 22px;border-radius:8px;border:0;background:#0891b2;color:#fff;font-size:15px;font-weight:600;cursor:pointer">Traduce</button>' +
+                    '<button type="button" class="tcf-ok" style="padding:9px 22px;border-radius:8px;border:0;background:#0891b2;color:#fff;font-size:15px;font-weight:600;cursor:pointer">OK</button>' +
                     '</div></div>';
                 document.body.appendChild(dlg);
                 const done = function (val) {
@@ -11596,8 +12053,71 @@ if (isset($_GET['action'])) {
         }
 
         function presentCategoryPairReport(result, force) {
+            // In fluxul articolului nou, raportul RO-EN este prezentat numai la minutul al doilea.
+            const newArticleFlow = window.newArticleIdentityWorkflow;
+            if (newArticleFlow && Date.now() < newArticleFlow.pairCheckAt) return;
+            if (document.getElementById('dateDuplicatesDialog') || document.getElementById('dateDupFileDialog')) {
+                window.pendingStartupCategoryPairReport = { result, force };
+                if (!window.pendingCategoryPairObserver) {
+                    window.pendingCategoryPairObserver = new MutationObserver(() => flushPendingCategoryPairReport());
+                    window.pendingCategoryPairObserver.observe(document.body, { childList: true });
+                }
+                return;
+            }
             if (postponeValidation('category-pairs', () => syncCategoryPairs([], force))) return;
-            const changes = pendingCategoryChanges(result.changes), issues = result.issues || [], proposals = result.proposals || [];
+            const orphanedNewRoFiles = (result.issues || []).map(issue => {
+                const match = String(issue).match(/^(ro\/[^:]+):/i);
+                return match && /nicio categorie/i.test(issue) && /corespondent\s+EN\s+valid.*FLAGS/i.test(issue)
+                    ? match[1].toLowerCase() : null;
+            }).filter(Boolean);
+            if (orphanedNewRoFiles.length) {
+                registerPendingRoTranslations(orphanedNewRoFiles);
+                schedulePendingRoTranslationReview();
+            }
+            const changes = pendingCategoryChanges(result.changes);
+            const pendingRoArticles = readPendingRoTranslations();
+            const newArticleFiles = new Set([
+                ...Object.keys(pendingRoArticles),
+                ...(((newArticleFlow && newArticleFlow.newFiles) || []).map(file => String(file).toLowerCase()))
+            ]);
+            const dueRoReminders = Object.values(pendingRoArticles).filter(item =>
+                !item.reminderShownAt && Date.now() >= Number(item.detectedAt || 0) + 2 * 60 * 60 * 1000
+            ).map(item => item.file + ': nu are încă un corespondent EN valid în FLAGS după două ore; verifică dacă ai creat versiunea EN.');
+            const issues = [...(result.issues || []), ...dueRoReminders].filter(issue => {
+                const flagMismatch = String(issue).match(/^FLAGS\s+(?:RO|EN)\s+diferite:\s+(ro|en)\/([^ ]+).*?;\s*(ro|en)\/([^ ]+)\s/);
+                if (flagMismatch) {
+                    const first = flagMismatch[1].toLowerCase() + '/' + flagMismatch[2].toLowerCase();
+                    const second = flagMismatch[3].toLowerCase() + '/' + flagMismatch[4].toLowerCase();
+                    if (newArticleFiles.has(first) || newArticleFiles.has(second)) return false;
+                }
+                const newRoIssue = String(issue).match(/^(ro\/[^:]+):/i);
+                if (newRoIssue) {
+                    const key = newRoIssue[1].toLowerCase();
+                    const pending = pendingRoArticles[key];
+                    const isMissingPair = /corespondent\s+EN\s+valid/i.test(issue);
+                    if (pending && isMissingPair
+                        && Date.now() < Number(pending.detectedAt || 0) + 2 * 60 * 60 * 1000) return false;
+                }
+                return true;
+            });
+            let pendingChanged = false;
+            if (force) {
+                for (const issue of issues) {
+                    const unpaired = String(issue).match(/^(ro\/[^:]+):.*corespondent\s+EN\s+valid/i);
+                    const pending = unpaired && pendingRoArticles[unpaired[1].toLowerCase()];
+                    if (pending && !pending.reminderShownAt
+                        && Date.now() >= Number(pending.detectedAt || 0) + 2 * 60 * 60 * 1000) {
+                        pending.reminderShownAt = Date.now();
+                        pendingChanged = true;
+                    }
+                }
+                if (pendingChanged) writePendingRoTranslations(pendingRoArticles);
+            }
+            const proposals = (result.proposals || []).filter(proposal => {
+                const roArticle = proposal.ro_article ? 'ro/' + String(proposal.ro_article).toLowerCase() : '';
+                const enArticle = proposal.lang === 'en' && proposal.article ? 'en/' + String(proposal.article).toLowerCase() : '';
+                return !newArticleFiles.has(roArticle) && !newArticleFiles.has(enArticle);
+            });
             if (!changes.length && !issues.length && !proposals.length) {
                 localStorage.removeItem('categoryPairLastReport');
                 const oldReport = document.getElementById('categoryPairReport');
@@ -11775,6 +12295,8 @@ if (isset($_GET['action'])) {
                     if (done.length) toast('Aplicat: ' + done.map(id => id.replace(/^(ro|en)\//, '$1/').replace(/->.*$/, '')).join(', '));
                     result = Object.assign({}, result, { changes: [] });
                 }
+                await registerUnpairedRoFlagsFromIssues(result);
+                await refreshPendingRoTranslations();
                 presentCategoryPairReport(result, force || applying);
                 for (const change of result.changes || []) {
                     const tab = findTabByPath(change.file);
@@ -11799,11 +12321,8 @@ if (isset($_GET['action'])) {
                 }
             }
         }
-        window.addEventListener('load', () => {
-            fetch('?action=categoryPairSync&report=1', { cache: 'no-store' }).then(r => r.json()).then(r => presentCategoryPairReport(r, true)).catch(console.error);
-            syncCategoryPairs([], true).catch(e => showEmailConsole('Sincronizare RO–EN — eroare', e.message, '#f87171'));
-        });
         async function checkIdleCategoryPairs() {
+            if (!window.articleStartupChecksReady) return;
             if (tabs.some(t => t.type !== 'browser' && (t.filePath || t.fileName))) return;
             if (categoryPairSyncPromise || _translatePollTimer || rssGenerating || document.hidden) return;
             // cât timp fereastra cu propuneri e deschisă, nu o redesenez pe sub mâna utilizatorului
@@ -11867,10 +12386,18 @@ if (isset($_GET['action'])) {
             }
             const dlg0 = document.getElementById('emailConsoleDialog');
             if (dlg0) dlg0.style.display = 'none';
-            if (!info.resume && !await confirmTranslateDialog(info.files)) { enable(); return; }
+            // Confirma lista exacta indiferent daca exista o publicare salvata dintr-o rulare veche.
+            if (!await confirmTranslateDialog(info.files)) {
+                enable();
+                showEmailConsole('Translate', 'Traducerea a fost anulată.', '#94a3b8');
+                return;
+            }
             let r;
             try {
-                r = await (await fetch('?action=translateSiteStart', { method: 'POST', body: new URLSearchParams({}) })).json();
+                r = await (await fetch('?action=translateSiteStart', {
+                    method: 'POST',
+                    body: new URLSearchParams({ files: JSON.stringify(info.files) })
+                })).json();
             } catch (e) { enable(); showEmailConsole('Translate — eroare', 'Eroare: ' + e.message, '#f87171'); return; }
             if (!r.ok && !r.running) { enable(); showEmailConsole('Translate — eroare', r.error || 'Eroare necunoscută.', '#f87171'); return; }
             showEmailConsole('Translate — rulează…', 'Pornesc scriptul...\n(poți închide fereastra; traducerea merge mai departe)', '#facc15');
