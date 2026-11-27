@@ -1014,7 +1014,29 @@ if (isset($_GET['action'])) {
             $lines[] = "$lang: " . str_replace('/', '\\', $target) . ' — rescris la ' . date('H:i:s', filemtime($target)) . ', ' . number_format(filesize($target) / 1024, 0) . ' KB, ' . substr_count($xml, '<item>') . ' articole'
                 . ($before[$lang] ? ' (înainte: ' . date('H:i:s', $before[$lang]['mtime']) . ', ' . number_format($before[$lang]['size'] / 1024, 0) . ' KB)' : '');
         }
-        echo json_encode(['ok'=>true,'log'=>"RSS a fost generat în RO și în EN în " . round(microtime(true) - $started, 1) . " s.\n" . implode("\n", $lines)], JSON_UNESCAPED_UNICODE); exit;
+        // Apoi urcă ambele fluxuri pe FTP: ro -> /public_html/rss.xml, en -> /public_html/en/rss.xml (verificat)
+        $ftpStart = microtime(true);
+        $ftpErr = tempnam(sys_get_temp_dir(), 'rssftp');
+        $ftpProc = proc_open([$python, '-X', 'utf8', __DIR__ . '/publica_rss_ftp.py'], [0=>['pipe','r'],1=>['pipe','w'],2=>['file',$ftpErr,'a']], $ftpPipes, __DIR__, null, ['bypass_shell'=>true]);
+        $ftp = null;
+        if (is_resource($ftpProc)) {
+            fclose($ftpPipes[0]);
+            $ftpOut = stream_get_contents($ftpPipes[1]); fclose($ftpPipes[1]);
+            proc_close($ftpProc);
+            $ftp = json_decode(trim($ftpOut), true);
+            if (!is_array($ftp)) $ftp = ['ok' => false, 'error' => trim($ftpOut . ' ' . @file_get_contents($ftpErr))];
+        } else {
+            $ftp = ['ok' => false, 'error' => 'Nu pot porni urcarea pe FTP.'];
+        }
+        @unlink($ftpErr);
+        if (!empty($ftp['ok'])) {
+            $lines[] = 'FTP: urcat și verificat în ' . round(microtime(true) - $ftpStart, 1) . ' s:';
+            foreach ($ftp['uploads'] as $u) {
+                $lines[] = '   ' . strtoupper($u['lang']) . ' → ' . $u['remote'] . ' (' . number_format($u['size'] / 1024, 0) . ' KB)';
+            }
+            echo json_encode(['ok'=>true,'log'=>"RSS a fost generat în RO și în EN în " . round(microtime(true) - $started, 1) . " s.\n" . implode("\n", $lines)], JSON_UNESCAPED_UNICODE); exit;
+        }
+        echo json_encode(['ok'=>false,'error'=>"RSS a fost generat local, dar urcarea pe FTP a eșuat: " . ($ftp['error'] ?? 'eroare necunoscută') . "\n" . implode("\n", $lines)], JSON_UNESCAPED_UNICODE); exit;
     }
     // Amprenta ieftina a site-ului (Principal/ro si /en): numarul de HTML-uri + cea mai noua data de
     // modificare. Se schimba cand copiezi/inlocuiesti un fisier -> editorul porneste imediat verificarile.
@@ -1044,6 +1066,85 @@ if (isset($_GET['action'])) {
         echo json_encode(['ok' => true]);
         exit;
     }
+    // Repara canonicalul si steagul unei limbi intr-un articol din Principal/ro sau /en.
+    if ($action === 'repairArticleIdentity' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $relative = trim((string) ($_POST['file'] ?? ''));
+        $flagLang = strtolower(trim((string) ($_POST['flagLang'] ?? '')));
+        $flagTarget = trim((string) ($_POST['flagTarget'] ?? ''));
+        if (!preg_match('#^(ro|en)/([A-Za-z0-9._-]+\.html?)$#i', $relative, $pathMatch)
+            || !in_array($flagLang, ['ro', 'en'], true)
+            || !preg_match('/^[A-Za-z0-9._-]+\.html?$/i', $flagTarget)) {
+            echo json_encode(['ok' => false, 'error' => 'Fisierul sau destinatia steagului nu sunt valide.'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        $lang = strtolower($pathMatch[1]);
+        $fileName = basename($pathMatch[2]);
+        $full = resolve_path('Principal/' . $relative, $ROOT);
+        $flagDir = resolve_path('Principal/' . $flagLang, $ROOT);
+        if (!is_file($full) || !is_file($flagDir . '/' . $flagTarget)) {
+            echo json_encode(['ok' => false, 'error' => 'Fisierul articolului sau pagina-tinta a steagului nu exista.'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        $raw = @file_get_contents($full);
+        if ($raw === false) {
+            echo json_encode(['ok' => false, 'error' => 'Nu pot citi fisierul ' . $relative], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        $canonicalUrl = 'https://neculaifantanaru.com/' . ($lang === 'en' ? 'en/' : '') . $fileName;
+        $canonicalCount = 0;
+        $canonicalHrefCount = 0;
+        $updated = preg_replace_callback('/<link\b(?=[^>]*\brel\s*=\s*["\'][^"\']*\bcanonical\b[^"\']*["\'])[^>]*>/i',
+            function ($m) use ($canonicalUrl, &$canonicalCount, &$canonicalHrefCount) {
+                $canonicalCount++;
+                return preg_replace_callback('/(\bhref\s*=\s*)(["\'])(.*?)\2/i',
+                    function ($h) use ($canonicalUrl, &$canonicalHrefCount) {
+                        $canonicalHrefCount++;
+                        return $h[1] . $h[2] . $canonicalUrl . $h[2];
+                    }, $m[0], 1);
+            }, $raw);
+        if ($updated === null || $canonicalCount < 1 || $canonicalHrefCount < 1) {
+            echo json_encode(['ok' => false, 'error' => 'Nu am gasit un canonical cu href care sa poata fi reparat.'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        $flagSections = 0;
+        $flagLinks = 0;
+        $updated = preg_replace_callback('/(<!--\s*FLAGS_1\s*-->)([\s\S]*?)(<!--\s*FLAGS\s*-->)/i',
+            function ($section) use ($flagLang, $flagTarget, &$flagSections, &$flagLinks) {
+                $flagSections++;
+                $body = preg_replace_callback('/<a\b[^>]*>[\s\S]*?<\/a\s*>/i',
+                    function ($a) use ($flagLang, $flagTarget, &$flagLinks) {
+                        if (!preg_match('/<img\b[^>]*\bsrc\s*=\s*["\'][^"\']*flag_lang_' . preg_quote($flagLang, '/') . '\.[^"\']*["\'][^>]*>/i', $a[0])) return $a[0];
+                        $targetUrl = 'https://neculaifantanaru.com/' . ($flagLang === 'en' ? 'en/' : '') . $flagTarget;
+                        return preg_replace_callback('/(\bhref\s*=\s*)(["\'])(.*?)\2/i',
+                            function ($h) use ($targetUrl, &$flagLinks) {
+                                $flagLinks++;
+                                return $h[1] . $h[2] . $targetUrl . $h[2];
+                            }, $a[0], 1);
+                    }, $section[2]);
+                return $section[1] . $body . $section[3];
+            }, $updated);
+        if ($updated === null || $flagSections < 1 || $flagLinks < 1) {
+            echo json_encode(['ok' => false, 'error' => 'Nu am gasit steagul ' . strtoupper($flagLang) . ' in sectiunea FLAGS.'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        $changed = $updated !== $raw;
+        if ($changed) {
+            $backupPath = create_pre_save_backup($full);
+            if (!$backupPath) {
+                echo json_encode(['ok' => false, 'error' => 'Nu am putut crea backupul inainte de reparare.'], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            if (@file_put_contents($full, $updated, LOCK_EX) !== strlen($updated)) {
+                @copy($backupPath, $full);
+                echo json_encode(['ok' => false, 'error' => 'Scriere incompleta; fisierul anterior a fost restaurat.'], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+        }
+        echo json_encode(['ok' => true, 'changed' => $changed, 'file' => $relative, 'canonical' => $canonicalUrl,
+            'flagLang' => $flagLang, 'flagTarget' => $flagTarget], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
     if ($action === 'categoryPairSync') {
         ini_set('display_errors', '0');
         @set_time_limit(600);
@@ -6468,6 +6569,14 @@ if (isset($_GET['action'])) {
                 if (!silent) toast('Data „' + cur.text.replace(/^On\s+/i, '') + '” nu mai apare în alt articol.');
                 return;
             }
+            // O copie noua pastreaza slugul paginii-sursa in canonical, FLAGS si JSON-LD.
+            // Dupa confirmarea datei duplicate, aliniem toate aparitiile la numele fisierului.
+            const identityFix = repairCopiedArticleIdentity(editor.getValue(), currentFile);
+            if (identityFix.changed) {
+                editor.setValue(identityFix.html);
+                const active = tabs.find(t => t.id === activeTabId);
+                if (active) active._identityRepairNotice = identityFix.message;
+            }
             const used = new Set(others.map(a => a.key));
             const mine = data.items.find(a => dateDupNormPath(a.file) === me);
             const meEntry = { file: currentFile, key: cur.key, date: cur.text, cat: mine ? mine.cat : '', catName: mine ? mine.catName : '', current: true };
@@ -6481,6 +6590,36 @@ if (isset($_GET['action'])) {
         }
 
         // Chemat la fiecare schimbare în cod: dacă s-a schimbat data articolului, verifică după 10 s
+        function repairCopiedArticleIdentity(source, filePath) {
+            const site = /\/Principal\/(ro|en)\/([^/]+\.html?)$/i.exec(String(filePath || '').replace(/\\/g, '/'));
+            if (!site) return { html: source, changed: false, message: '' };
+            const fileName = site[2];
+            let html = String(source || '');
+            const link = html.match(/<link\b[^>]*\brel\s*=\s*["']canonical["'][^>]*>/i);
+            const hrefMatch = link && link[0].match(/\bhref\s*=\s*["']([^"']+)["']/i);
+            let oldName = '';
+            if (hrefMatch) {
+                try { oldName = decodeURIComponent(new URL(hrefMatch[1], 'https://neculaifantanaru.com').pathname.split('/').pop() || ''); }
+                catch (_) { oldName = hrefMatch[1].split(/[?#]/)[0].split('/').pop() || ''; }
+            }
+            let replacedSlug = false;
+            if (oldName && oldName.toLowerCase() !== fileName.toLowerCase()) {
+                const escaped = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const re = new RegExp(escaped, 'gi');
+                replacedSlug = re.test(html);
+                re.lastIndex = 0;
+                html = html.replace(re, fileName);
+            }
+            const beforeExtensionFix = html;
+            html = html.replace(/\.html(?:\.html)+/gi, '.html');
+            const extensionFixed = html !== beforeExtensionFix;
+            const changed = html !== source;
+            const items = [];
+            if (replacedSlug) items.push('slugul vechi a fost inlocuit cu ' + fileName + ' peste tot (canonical si FLAGS incluse)');
+            if (extensionFixed) items.push('extensiile .html.html au fost corectate');
+            return { html, changed, message: changed ? 'Identitate sincronizata automat: ' + items.join('; ') + '. Salveaza cu Ctrl+S.' : '' };
+        }
+
         function noteEditorChangeForDateCheck() {
             if (!editor || !activeTabId || !currentFile || !dateDupDirOfFile(currentFile)) return;
             const tab = tabs.find(t => t.id === activeTabId);
@@ -6767,6 +6906,15 @@ if (isset($_GET['action'])) {
             head.appendChild(recheck);
             head.appendChild(close);
             box.appendChild(head);
+            if (currentPath) {
+                const active = tabs.find(t => t.id === activeTabId);
+                if (active && active._identityRepairNotice) {
+                    const notice = document.createElement('div');
+                    notice.style.cssText = 'padding:8px 16px;color:#86efac;background:rgba(34,197,94,.08);border-bottom:1px solid #374151;font-size:13px';
+                    notice.textContent = active._identityRepairNotice;
+                    box.appendChild(notice);
+                }
+            }
 
             // Fereastra mare: Find propriu (caută doar în dublurile de aici) + Copy (tot ca text)
             let findInput = null, findInfo = null;
@@ -11409,6 +11557,44 @@ if (isset($_GET['action'])) {
             return wrap;
         }
         // force: la pornire și după „OK, aplică” fereastra se arată din nou cât timp problema nu e rezolvată.
+        async function repairCategoryPairFlag(correction, button, status) {
+            const sitePath = 'e:/Carte/BB/17 - Site Leadership/Principal/' + correction.path;
+            const openTab = tabs.find(t => normPathLoose(t.filePath) === normPathLoose(sitePath));
+            if (openTab && openTab.isDirty) {
+                showEmailConsole('Reparare amanata', 'Fisierul ' + correction.path + ' are modificari nesalvate. Salveaza-l, apoi apasa din nou Repară.', '#f87171');
+                return;
+            }
+            button.disabled = true;
+            button.textContent = 'Se repara...';
+            try {
+                const body = new URLSearchParams({ file: correction.path, flagLang: correction.lang, flagTarget: correction.correct });
+                const response = await fetch('?action=repairArticleIdentity', { method: 'POST', body });
+                const result = await response.json();
+                if (!response.ok || !result.ok) throw new Error(result.error || ('HTTP ' + response.status));
+                button.textContent = 'Reparat';
+                button.style.background = '#166534';
+                status.textContent = result.changed
+                    ? 'Canonicalul si steagul ' + correction.lang.toUpperCase() + ' au fost aliniate cu numele corect.'
+                    : 'Canonicalul si steagul ' + correction.lang.toUpperCase() + ' erau deja corecte.';
+                status.style.color = '#86efac';
+                await dateSyncRefreshTab(openTab ? openTab.filePath : sitePath);
+                if (categoryPairSyncPromise) {
+                    try { await categoryPairSyncPromise; } catch (_) { }
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                }
+                try { await syncCategoryPairs([], true); }
+                catch (e) {
+                    status.textContent += ' Reverificarea automata nu a raspuns: ' + e.message;
+                    status.style.color = '#fcd18b';
+                }
+            } catch (e) {
+                button.disabled = false;
+                button.textContent = 'Repară';
+                status.textContent = 'Nu s-a putut repara: ' + e.message;
+                status.style.color = '#fca5a5';
+            }
+        }
+
         function presentCategoryPairReport(result, force) {
             if (postponeValidation('category-pairs', () => syncCategoryPairs([], force))) return;
             const changes = pendingCategoryChanges(result.changes), issues = result.issues || [], proposals = result.proposals || [];
@@ -11453,6 +11639,15 @@ if (isset($_GET['action'])) {
             }
             const corrections = new Map();
             for (const issue of issues) {
+                const canonical = issue.match(/^CANONICAL (RO|EN) diferit: (ro|en)\/([^ ]+) -> (.*?); trebuie sa indice (.+)$/);
+                if (!canonical) continue;
+                const lang = canonical[2].toLowerCase();
+                const path = lang + '/' + canonical[3];
+                corrections.set('canonical:' + path, {
+                    lang, path, wrong: canonical[4], correct: canonical[3], canonicalOnly: true
+                });
+            }
+            for (const issue of issues) {
                 const m = issue.match(/^FLAGS (RO|EN) diferite: (ro|en)\/([^ ]+) → ([^;]+); (ro|en)\/([^ ]+) → (.+)$/);
                 if (!m) continue;
                 const lang = m[1].toLowerCase();
@@ -11470,12 +11665,25 @@ if (isset($_GET['action'])) {
                 card.style.cssText = 'margin:14px 0;padding:16px;border:1px solid #475569;border-radius:10px;background:#151c29;overflow-wrap:anywhere';
                 const pair = document.createElement('p');
                 pair.style.cssText = 'margin:0 0 8px;color:#93c5fd';
-                pair.textContent = 'Pereche: ro/' + correction.pair.ro + ' ↔ en/' + correction.pair.en;
+                pair.textContent = correction.canonicalOnly
+                    ? 'Articol: ' + correction.path
+                    : 'Pereche: ro/' + correction.pair.ro + ' ↔ en/' + correction.pair.en;
                 const instruction = document.createElement('p'); instruction.style.margin = '0 0 8px';
-                instruction.textContent = 'În fișierul ' + correction.path + ', schimbă linkul steagului ' + correction.lang.toUpperCase() + ':';
+                instruction.textContent = 'In fisierul ' + correction.path + ', canonicalul si steagul ' + correction.lang.toUpperCase() + ' trebuie sa indice:';
                 const wrong = document.createElement('strong'); wrong.style.color = '#fca5a5'; wrong.textContent = correction.wrong;
                 const right = document.createElement('strong'); right.style.color = '#86efac'; right.textContent = correction.correct;
                 card.append(pair, instruction, wrong, document.createTextNode(' → '), right);
+                const repairRow = document.createElement('div');
+                repairRow.style.cssText = 'display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap';
+                const repairButton = document.createElement('button');
+                repairButton.type = 'button';
+                repairButton.textContent = 'Repară';
+                repairButton.style.cssText = 'padding:6px 16px;border:1px solid #86efac;border-radius:7px;background:#166534;color:#fff;font:600 14px system-ui;cursor:pointer';
+                const repairStatus = document.createElement('span');
+                repairStatus.style.cssText = 'font-size:13px;color:#cbd5e1';
+                repairButton.onclick = () => repairCategoryPairFlag(correction, repairButton, repairStatus);
+                repairRow.append(repairButton, repairStatus);
+                card.appendChild(repairRow);
                 dialog.appendChild(card);
             }
             for (const issue of issues) {
@@ -11533,7 +11741,21 @@ if (isset($_GET['action'])) {
                 let result, tries = 0;
                 do {
                     // la aplicare, serverul așteaptă singur lacătul (până la 3 min); verificările simple renunță
-                    result = await (await fetch('?action=categoryPairSync', { method: 'POST', body: new URLSearchParams({ exclude: JSON.stringify(exclude), apply: JSON.stringify(applyIds || []) }) })).json();
+                    const requestBody = new URLSearchParams({ exclude: JSON.stringify(exclude), apply: JSON.stringify(applyIds || []) });
+                    let requestError = null;
+                    for (let attempt = 0; attempt < 3; attempt++) {
+                        try {
+                            const response = await fetch('?action=categoryPairSync', { method: 'POST', body: requestBody });
+                            if (!response.ok) throw new Error('Serverul a raspuns cu HTTP ' + response.status + '.');
+                            result = await response.json();
+                            requestError = null;
+                            break;
+                        } catch (e) {
+                            requestError = e;
+                            if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 1200 * (attempt + 1)));
+                        }
+                    }
+                    if (requestError) throw new Error('Nu am primit raspunsul verificarii RO-EN dupa 3 incercari. ' + requestError.message);
                     if (result.busy) {
                         if (!applying) return result; // altă verificare rulează deja; raportul ei e suficient
                         if (++tries >= 3) throw new Error('Serverul este ocupat cu altă verificare. Încearcă din nou peste un minut.');

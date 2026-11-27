@@ -6,3 +6,58 @@
 2026-11-25 06:45:28  REPARAT    (OK, aplică)  [Dată greșită] en/movie-scripts.html ↔ ro/scenarii-de-film.html; dată: On May 8, 2008 → On May 07, 2008
 2026-11-25 06:49:16  GĂSIT      [Dată greșită] en/movie-scripts.html ↔ ro/scenarii-de-film.html; dată: On May 8, 2008 → On May 07, 2008
 2026-11-25 06:50:03  REPARAT    (OK, aplică)  [Dată greșită] en/movie-scripts.html ↔ ro/scenarii-de-film.html; dată: On May 8, 2008 → On May 07, 2008
+2026-11-25 13:56:16  PROBLEMĂ   ro/triumful-inteligentei-ascunse.html: nu este în nicio categorie și nu are corespondent EN valid în FLAGS
+2026-11-25 13:56:16  PROBLEMĂ   ro/triumful-inteligentei-ascunse.html: steagul RO indică solus-custos-absconditus-finis-mali.html, dar trebuie să indice triumful-inteligentei-ascunse.html
+2026-11-25 13:56:16  GĂSIT      [Dată duplicată] ro: Aprilie 22, 2026 — triumful-inteligentei-ascunse.html, solus-custos-absconditus-finis-mali.html
+2026-11-25 14:04:57  REZOLVAT   [Dată duplicată] ro: Aprilie 22, 2026 — triumful-inteligentei-ascunse.html, solus-custos-absconditus-finis-mali.html
+2026-11-25 14:06:42  RECUPERAT   solus-custos-absconditus-finis-mali.html → E:\Carte\BB\17 - Site Leadership\Principal\ro\leadership-fusion.html (linkul și blocul lipseau din categorie)
+2026-11-25 14:06:42  PROBLEMĂ   ro/triumful-inteligentei-ascunse.html: corespondent lipsă en/triumful-inteligentei-ascunse.html
+2026-11-25 14:06:42  PROBLEMĂ REZOLVATĂ  ro/triumful-inteligentei-ascunse.html: nu este în nicio categorie și nu are corespondent EN valid în FLAGS
+2026-11-25 14:06:42  PROBLEMĂ REZOLVATĂ  ro/triumful-inteligentei-ascunse.html: steagul RO indică solus-custos-absconditus-finis-mali.html, dar trebuie să indice triumful-inteligentei-ascunse.html
+2026-11-25 14:09:51  PROBLEMĂ REZOLVATĂ  ro/triumful-inteligentei-ascunse.html: corespondent lipsă en/triumful-inteligentei-ascunse.html
+2026-11-25 17:17:43  PROBLEMĂ   ro/adsfdsffsd.html: nu este în nicio categorie și nu are corespondent EN valid în FLAGS
+2026-11-25 17:20:14  PROBLEMĂ   ro/adsfdsffsd.html: steagul RO indică triumful-inteligentei-ascunse.html, dar trebuie să indice adsfdsffsd.html
+2026-11-25 17:20:14  GĂSIT      [Dată duplicată] ro: Noiembrie 25, 2026 — adsfdsffsd.html, triumful-inteligentei-ascunse.html
+2026-11-25 17:21:16  REPARAT    [Dată duplicată] adsfdsffsd.html: Noiembrie 25, 2026 → Noiembrie 23, 2026 (din fereastra Date duplicate)
+2026-11-25 17:21:17  REZOLVAT   [Dată duplicată] ro: Noiembrie 25, 2026 — adsfdsffsd.html, triumful-inteligentei-ascunse.html
+2026-11-25 17:21:34  PROBLEMĂ REZOLVATĂ  ro/adsfdsffsd.html: nu este în nicio categorie și nu are corespondent EN valid în FLAGS
+2026-11-25 17:21:34  PROBLEMĂ REZOLVATĂ  ro/adsfdsffsd.html: steagul RO indică triumful-inteligentei-ascunse.html, dar trebuie să indice adsfdsffsd.html
+2026-11-26 18:56:01  PROBLEMĂ   ro/ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html: nu este în nicio categorie și nu are corespondent EN valid în FLAGS
+2026-11-26 18:56:01  PROBLEMĂ   ro/ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html: steagul RO indică in-cautarea-miraculosului.html, dar trebuie să indice ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html
+2026-11-26 18:56:02  GĂSIT      [Dată duplicată] ro: Noiembrie 03, 2010 — ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html, in-cautarea-miraculosului.html
+2026-11-26 18:56:17  REPARAT    [Dată duplicată] ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html: Noiembrie 03, 2010 → Noiembrie 15, 2010 (din fereastra Date duplicate)
+2026-11-26 18:56:17  REZOLVAT   [Dată duplicată] ro: Noiembrie 03, 2010 — ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html, in-cautarea-miraculosului.html
+2026-11-26 19:13:58  PROBLEMĂ   FLAGS RO diferite: ro/ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html → ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html.html; en/in-search-of-the-miraculous.html → in-cautarea-miraculosului.html
+2026-11-26 19:13:58  PROBLEMĂ   ro/ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html: steagul RO indică ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html.html, dar trebuie să indice ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html
+2026-11-26 19:13:58  PROBLEMĂ REZOLVATĂ  ro/ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html: steagul RO indică in-cautarea-miraculosului.html, dar trebuie să indice ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html
+2026-11-26 19:20:04  PROBLEMĂ   FLAGS RO diferite: en/what-only-i-was-given-to-see.html → ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html; ro/ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html → ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html.html
+2026-11-26 19:20:04  PROBLEMĂ   FLAGS RO diferite: ro/ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html → ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html.html; en/what-only-i-was-given-to-see.html → ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html
+2026-11-26 19:20:04  PROBLEMĂ REZOLVATĂ  FLAGS RO diferite: ro/ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html → ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html.html; en/in-search-of-the-miraculous.html → in-cautarea-miraculosului.html
+2026-11-26 19:20:04  PROBLEMĂ REZOLVATĂ  ro/ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html: nu este în nicio categorie și nu are corespondent EN valid în FLAGS
+2026-11-26 19:32:48  PROBLEMĂ REZOLVATĂ  FLAGS RO diferite: en/what-only-i-was-given-to-see.html → ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html; ro/ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html → ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html.html
+2026-11-26 19:32:48  PROBLEMĂ REZOLVATĂ  FLAGS RO diferite: ro/ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html → ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html.html; en/what-only-i-was-given-to-see.html → ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html
+2026-11-26 19:32:48  PROBLEMĂ REZOLVATĂ  ro/ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html: steagul RO indică ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html.html, dar trebuie să indice ceea-ce-numai-mie-mi-a-fost-dat-sa-vad.html
+2026-11-27 16:59:46  PROBLEMĂ   FLAGS EN diferite: en/look-at-me-as-the-eye-looks-at-itself.html → look-at-me-as-the-eye-looks-at-itself2.html; ro/priveste-ma-asa-cum-se-priveste-ochiul-pe-sine.html → look-at-me-as-the-eye-looks-at-itself.html
+2026-11-27 16:59:46  PROBLEMĂ   FLAGS EN diferite: ro/priveste-ma-asa-cum-se-priveste-ochiul-pe-sine.html → look-at-me-as-the-eye-looks-at-itself.html; en/look-at-me-as-the-eye-looks-at-itself.html → look-at-me-as-the-eye-looks-at-itself2.html
+2026-11-27 16:59:46  PROBLEMĂ   en/look-at-me-as-the-eye-looks-at-itself.html: steagul EN indică look-at-me-as-the-eye-looks-at-itself2.html, dar trebuie să indice look-at-me-as-the-eye-looks-at-itself.html
+2026-11-27 17:12:43  PROBLEMĂ REZOLVATĂ  FLAGS EN diferite: en/look-at-me-as-the-eye-looks-at-itself.html → look-at-me-as-the-eye-looks-at-itself2.html; ro/priveste-ma-asa-cum-se-priveste-ochiul-pe-sine.html → look-at-me-as-the-eye-looks-at-itself.html
+2026-11-27 17:12:43  PROBLEMĂ REZOLVATĂ  FLAGS EN diferite: ro/priveste-ma-asa-cum-se-priveste-ochiul-pe-sine.html → look-at-me-as-the-eye-looks-at-itself.html; en/look-at-me-as-the-eye-looks-at-itself.html → look-at-me-as-the-eye-looks-at-itself2.html
+2026-11-27 17:12:43  PROBLEMĂ REZOLVATĂ  en/look-at-me-as-the-eye-looks-at-itself.html: steagul EN indică look-at-me-as-the-eye-looks-at-itself2.html, dar trebuie să indice look-at-me-as-the-eye-looks-at-itself.html
+2026-11-27 17:23:11  PROBLEMĂ   CANONICAL EN diferit: en/look-at-me-as-the-eye-looks-at-itself.html -> https://neculaifantanaru.com/en/look-at-me-as-the-eye-looks-at-itself2.html; trebuie sa indice https://neculaifantanaru.com/en/look-at-me-as-the-eye-looks-at-itself.html
+2026-11-27 17:23:20  PROBLEMĂ REZOLVATĂ  CANONICAL EN diferit: en/look-at-me-as-the-eye-looks-at-itself.html -> https://neculaifantanaru.com/en/look-at-me-as-the-eye-looks-at-itself2.html; trebuie sa indice https://neculaifantanaru.com/en/look-at-me-as-the-eye-looks-at-itself.html
+2026-11-27 17:23:45  PROBLEMĂ   CANONICAL RO diferit: ro/player-si-gamer.html -> https://neculaifantanaru.com/player-si-gamer2.html; trebuie sa indice https://neculaifantanaru.com/player-si-gamer.html
+2026-11-27 17:23:45  PROBLEMĂ   FLAGS RO diferite: en/player-and-gamer.html → player-si-gamer.html; ro/player-si-gamer.html → player-si-gamer2.html
+2026-11-27 17:23:45  PROBLEMĂ   FLAGS RO diferite: ro/player-si-gamer.html → player-si-gamer2.html; en/player-and-gamer.html → player-si-gamer.html
+2026-11-27 17:23:45  PROBLEMĂ   ro/player-si-gamer.html: steagul RO indică player-si-gamer2.html, dar trebuie să indice player-si-gamer.html
+2026-11-27 17:23:53  PROBLEMĂ REZOLVATĂ  CANONICAL RO diferit: ro/player-si-gamer.html -> https://neculaifantanaru.com/player-si-gamer2.html; trebuie sa indice https://neculaifantanaru.com/player-si-gamer.html
+2026-11-27 17:23:53  PROBLEMĂ REZOLVATĂ  FLAGS RO diferite: en/player-and-gamer.html → player-si-gamer.html; ro/player-si-gamer.html → player-si-gamer2.html
+2026-11-27 17:23:53  PROBLEMĂ REZOLVATĂ  FLAGS RO diferite: ro/player-si-gamer.html → player-si-gamer2.html; en/player-and-gamer.html → player-si-gamer.html
+2026-11-27 17:23:53  PROBLEMĂ REZOLVATĂ  ro/player-si-gamer.html: steagul RO indică player-si-gamer2.html, dar trebuie să indice player-si-gamer.html
+2026-11-27 17:24:18  PROBLEMĂ   FLAGS EN diferite: en/player-and-gamer.html → player-and-gamer.html; ro/player-si-gamer.html → player-and-gamer2.html
+2026-11-27 17:24:18  PROBLEMĂ   ro/player-si-gamer.html: corespondent lipsă en/player-and-gamer2.html
+2026-11-27 17:24:31  PROBLEMĂ REZOLVATĂ  FLAGS EN diferite: en/player-and-gamer.html → player-and-gamer.html; ro/player-si-gamer.html → player-and-gamer2.html
+2026-11-27 17:24:31  PROBLEMĂ REZOLVATĂ  ro/player-si-gamer.html: corespondent lipsă en/player-and-gamer2.html
+2026-11-27 17:24:49  PROBLEMĂ   FLAGS RO diferite: ro/acceptare-totala-in-indefinit.html → acceptare-totala-in-indefinit.html; en/total-acceptance-into-the-indefinite.html → acceptare-totala-in-indefinit2.html
+2026-11-27 17:24:49  PROBLEMĂ   en/total-acceptance-into-the-indefinite.html: corespondent lipsă ro/acceptare-totala-in-indefinit2.html
+2026-11-27 17:24:59  PROBLEMĂ REZOLVATĂ  FLAGS RO diferite: ro/acceptare-totala-in-indefinit.html → acceptare-totala-in-indefinit.html; en/total-acceptance-into-the-indefinite.html → acceptare-totala-in-indefinit2.html
+2026-11-27 17:24:59  PROBLEMĂ REZOLVATĂ  en/total-acceptance-into-the-indefinite.html: corespondent lipsă ro/acceptare-totala-in-indefinit2.html

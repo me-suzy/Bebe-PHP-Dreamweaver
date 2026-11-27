@@ -77,6 +77,23 @@ def flags_bs4(text):
                         result[lang] = name
     return result
 
+
+def canonical_identity_issue(lang, name, text):
+    """Return a reportable issue when an article canonical does not identify its own file."""
+    if not re.search(r'<h1\b[^>]*\bclass\s*=\s*["\'][^"\']*\bden_articol\b', text, re.I):
+        return None
+    tag = re.search(r'<link\b(?=[^>]*\brel\s*=\s*["\'][^"\']*\bcanonical\b[^"\']*["\'])[^>]*>', text, re.I)
+    href = re.search(r'\bhref\s*=\s*["\']([^"\']*)["\']', tag[0], re.I) if tag else None
+    value = href[1] if href else '(lipsa)'
+    expected_path = ('/en/' if lang == 'en' else '/') + name
+    expected_url = 'https://neculaifantanaru.com' + expected_path
+    if href:
+        parsed = urlsplit(html_unescape(value))
+        if parsed.hostname and parsed.hostname.lower() in ('neculaifantanaru.com', 'www.neculaifantanaru.com') \
+                and unquote(parsed.path) == expected_path and not parsed.query and not parsed.fragment:
+            return None
+    return f'CANONICAL {lang.upper()} diferit: {lang}/{name} -> {value}; trebuie sa indice {expected_url}'
+
 def flag_pair_issues(maps, exists):
     issues = []
     for lang, entries in maps.items():
@@ -590,6 +607,9 @@ def sync(dry_run=False, excluded=(), apply_ids=()):
             raise ValueError('Folder lipsă: ' + str(folder))
         for path in sorted(folder.glob('*.html')):
             text = read(path)
+            canonical_issue = canonical_identity_issue(lang, path.name, text)
+            if canonical_issue:
+                issues.append(canonical_issue)
             pair = flags(text)
             if pair:
                 maps[lang][path.name] = pair
