@@ -1268,6 +1268,37 @@ if (isset($_GET['action'])) {
         fclose($pipes[0]); $output = stream_get_contents($pipes[1]); fclose($pipes[1]);
         $code = proc_close($proc); $errors = file_get_contents($errorFile); @unlink($errorFile);
         $data = json_decode($output, true);
+        if (is_array($data)) {
+            // Verifica si canonicalurile paginilor de categorie. Scriptul Python filtreaza intentionat
+            // canonicalurile fara H1 de articol; categoriile au marcajul ARTICOL CATEGORIE START.
+            $identityBase = rtrim($ROOT, '/\\') . '/Principal';
+            $identityIssues = $data['issues'] ?? [];
+            foreach (['ro', 'en'] as $identityLang) {
+                foreach (glob($identityBase . '/' . $identityLang . '/*.html') ?: [] as $identityFile) {
+                    $identityHtml = @file_get_contents($identityFile);
+                    if (!is_string($identityHtml)) continue;
+                    $isArticlePage = preg_match('~<h1\b[^>]*\bclass\s*=\s*["\'][^"\']*\bden_articol\b~i', $identityHtml);
+                    $isCategoryPage = strpos($identityHtml, '<!-- ARTICOL CATEGORIE START -->') !== false;
+                    if (!$isArticlePage && !$isCategoryPage) continue;
+                    $canonicalTag = preg_match('~<link\b(?=[^>]*\brel\s*=\s*["\'][^"\']*\bcanonical\b[^"\']*["\'])[^>]*>~i', $identityHtml, $tagMatch) ? $tagMatch[0] : '';
+                    $canonicalValue = $canonicalTag !== '' && preg_match('~\bhref\s*=\s*["\']([^"\']*)["\']~i', $canonicalTag, $hrefMatch) ? $hrefMatch[1] : '(lipsa)';
+                    $expectedPath = ($identityLang === 'en' ? '/en/' : '/') . basename($identityFile);
+                    $expectedUrl = 'https://neculaifantanaru.com' . $expectedPath;
+                    $parts = parse_url(html_entity_decode($canonicalValue, ENT_QUOTES, 'UTF-8'));
+                    if (!is_array($parts)) $parts = [];
+                    $host = strtolower($parts['host'] ?? '');
+                    $canonicalOk = in_array($host, ['neculaifantanaru.com', 'www.neculaifantanaru.com'], true)
+                        && rawurldecode($parts['path'] ?? '') === $expectedPath
+                        && empty($parts['query']) && empty($parts['fragment']);
+                    if (!$canonicalOk) {
+                        $identityIssue = 'CANONICAL ' . strtoupper($identityLang) . ' diferit: ' . $identityLang . '/' . basename($identityFile)
+                            . ' -> ' . $canonicalValue . '; trebuie sa indice ' . $expectedUrl;
+                        if (!in_array($identityIssue, $identityIssues, true)) $identityIssues[] = $identityIssue;
+                    }
+                }
+            }
+            $data['issues'] = $identityIssues;
+        }
         echo json_encode(is_array($data) ? $data : ['ok' => false, 'error' => 'Verificarea RO–EN a eșuat: ' . $errors], JSON_UNESCAPED_UNICODE);
         exit;
     }
@@ -12015,26 +12046,40 @@ if (isset($_GET['action'])) {
         }
         // force: la pornire și după „OK, aplică” fereastra se arată din nou cât timp problema nu e rezolvată.
         async function repairCategoryPairFlag(correction, button, status) {
-            const sitePath = 'e:/Carte/BB/17 - Site Leadership/Principal/' + correction.path;
-            const openTab = tabs.find(t => normPathLoose(t.filePath) === normPathLoose(sitePath));
-            if (openTab && openTab.isDirty) {
-                showEmailConsole('Reparare amanata', 'Fisierul ' + correction.path + ' are modificari nesalvate. Salveaza-l, apoi apasa din nou Repară.', '#f87171');
+            const paths = correction.syncRoPair
+                ? ['ro/' + correction.pair.ro, 'en/' + correction.pair.en]
+                : [correction.path];
+            const sitePaths = paths.map(path => 'e:/Carte/BB/17 - Site Leadership/Principal/' + path);
+            const openTabs = sitePaths.map(path => tabs.find(t => normPathLoose(t.filePath) === normPathLoose(path))).filter(Boolean);
+            const dirtyTab = openTabs.find(tab => tab.isDirty);
+            if (dirtyTab) {
+                showEmailConsole('Reparare amanata', 'Fisierul ' + dirtyTab.filePath + ' are modificari nesalvate. Salveaza-l, apoi apasa din nou Repara.', '#f87171');
                 return;
             }
             button.disabled = true;
             button.textContent = 'Se repara...';
             try {
-                const body = new URLSearchParams({ file: correction.path, flagLang: correction.lang, flagTarget: correction.correct });
-                const response = await fetch('?action=repairArticleIdentity', { method: 'POST', body });
-                const result = await response.json();
-                if (!response.ok || !result.ok) throw new Error(result.error || ('HTTP ' + response.status));
+                const results = [];
+                for (const path of paths) {
+                    const target = correction.syncRoPair ? correction.pair.ro : correction.correct;
+                    const body = new URLSearchParams({ file: path, flagLang: correction.lang, flagTarget: target });
+                    const response = await fetch('?action=repairArticleIdentity', { method: 'POST', body });
+                    const result = await response.json();
+                    if (!response.ok || !result.ok) throw new Error(result.error || ('HTTP ' + response.status));
+                    results.push(result);
+                }
                 button.textContent = 'Reparat';
                 button.style.background = '#166534';
-                status.textContent = result.changed
-                    ? 'Canonicalul si steagul ' + correction.lang.toUpperCase() + ' au fost aliniate cu numele corect.'
+                status.textContent = results.some(result => result.changed)
+                    ? (correction.syncRoPair
+                        ? 'Steagul RO a fost sincronizat in ambele pagini ale perechii, dupa ro/' + correction.pair.ro + '.'
+                        : 'Canonicalul si steagul ' + correction.lang.toUpperCase() + ' au fost aliniate cu numele corect.')
                     : 'Canonicalul si steagul ' + correction.lang.toUpperCase() + ' erau deja corecte.';
                 status.style.color = '#86efac';
-                await dateSyncRefreshTab(openTab ? openTab.filePath : sitePath);
+                for (let i = 0; i < sitePaths.length; i++) {
+                    const openTab = openTabs.find(tab => normPathLoose(tab.filePath) === normPathLoose(sitePaths[i]));
+                    await dateSyncRefreshTab(openTab ? openTab.filePath : sitePaths[i]);
+                }
                 if (categoryPairSyncPromise) {
                     try { await categoryPairSyncPromise; } catch (_) { }
                     await new Promise(resolve => setTimeout(resolve, 0));
@@ -12046,12 +12091,11 @@ if (isset($_GET['action'])) {
                 }
             } catch (e) {
                 button.disabled = false;
-                button.textContent = 'Repară';
+                button.textContent = 'Repara';
                 status.textContent = 'Nu s-a putut repara: ' + e.message;
                 status.style.color = '#fca5a5';
             }
         }
-
         function presentCategoryPairReport(result, force) {
             // In fluxul articolului nou, raportul RO-EN este prezentat numai la minutul al doilea.
             const newArticleFlow = window.newArticleIdentityWorkflow;
@@ -12084,11 +12128,14 @@ if (isset($_GET['action'])) {
                 !item.reminderShownAt && Date.now() >= Number(item.detectedAt || 0) + 2 * 60 * 60 * 1000
             ).map(item => item.file + ': nu are încă un corespondent EN valid în FLAGS după două ore; verifică dacă ai creat versiunea EN.');
             const issues = [...(result.issues || []), ...dueRoReminders].filter(issue => {
-                const flagMismatch = String(issue).match(/^FLAGS\s+(?:RO|EN)\s+diferite:\s+(ro|en)\/([^ ]+).*?;\s*(ro|en)\/([^ ]+)\s/);
+                const flagMismatch = String(issue).match(/^FLAGS\s+(?:RO|EN)\s+diferite:\s+(ro|en)\/([^\s]+)\s+(?:\u2192|\x1a|->)\s+[^;]+;\s*(ro|en)\/([^\s]+)\s+(?:\u2192|\x1a|->)\s/);
                 if (flagMismatch) {
                     const first = flagMismatch[1].toLowerCase() + '/' + flagMismatch[2].toLowerCase();
                     const second = flagMismatch[3].toLowerCase() + '/' + flagMismatch[4].toLowerCase();
-                    if (newArticleFiles.has(first) || newArticleFiles.has(second)) return false;
+                    const isRoPairMismatch = /^FLAGS\s+RO\s+diferite:/i.test(String(issue))
+                        && ((first.startsWith('ro/') && second.startsWith('en/'))
+                            || (first.startsWith('en/') && second.startsWith('ro/')));
+                    if ((newArticleFiles.has(first) || newArticleFiles.has(second)) && !isRoPairMismatch) return false;
                 }
                 const newRoIssue = String(issue).match(/^(ro\/[^:]+):/i);
                 if (newRoIssue) {
@@ -12124,7 +12171,7 @@ if (isset($_GET['action'])) {
                 if (oldReport) oldReport.remove();
                 return;
             }
-            const signature = JSON.stringify(['clear-flags-v4', changes, issues, proposals]);
+            const signature = JSON.stringify(['clear-flags-v5-ro-pair-arrow', changes, issues, proposals]);
             if (!force && localStorage.getItem('categoryPairLastReport') === signature) return;
             localStorage.setItem('categoryPairLastReport', signature);
             let dialog = document.getElementById('categoryPairReport');
@@ -12168,11 +12215,22 @@ if (isset($_GET['action'])) {
                 });
             }
             for (const issue of issues) {
-                const m = issue.match(/^FLAGS (RO|EN) diferite: (ro|en)\/([^ ]+) → ([^;]+); (ro|en)\/([^ ]+) → (.+)$/);
+                const m = String(issue).match(/^FLAGS\s+(RO|EN)\s+diferite:\s+(ro|en)\/([^\s]+)\s+(?:\u2192|\x1a|->)\s+([^;]+);\s*(ro|en)\/([^\s]+)\s+(?:\u2192|\x1a|->)\s+(.+)$/i);
                 if (!m) continue;
                 const lang = m[1].toLowerCase();
                 const pair = { [m[2]]: m[3], [m[5]]: m[6] };
                 if (!pair.ro || !pair.en) continue;
+                if (lang === 'ro') {
+                    const roSide = m[2] === 'ro' ? { file: m[3], value: m[4] } : { file: m[6], value: m[7] };
+                    const enSide = m[2] === 'en' ? { file: m[3], value: m[4] } : { file: m[6], value: m[7] };
+                    corrections.set('ro-pair:' + pair.ro + ':' + pair.en, {
+                        lang: 'ro', pair, path: 'en/' + pair.en,
+                        wrong: enSide.value !== pair.ro ? enSide.value : roSide.value, correct: pair.ro,
+                        wrongSource: enSide.value !== pair.ro ? 'pagina EN' : 'pagina RO',
+                        syncRoPair: true, roCurrent: roSide.value
+                    });
+                    continue;
+                }
                 for (const side of [{folder:m[2],file:m[3],value:m[4]}, {folder:m[5],file:m[6],value:m[7]}]) {
                     if (side.value === pair[lang]) continue;
                     const key = side.folder + '/' + side.file + ':' + lang;
@@ -12189,7 +12247,9 @@ if (isset($_GET['action'])) {
                     ? 'Articol: ' + correction.path
                     : 'Pereche: ro/' + correction.pair.ro + ' ↔ en/' + correction.pair.en;
                 const instruction = document.createElement('p'); instruction.style.margin = '0 0 8px';
-                instruction.textContent = 'In fisierul ' + correction.path + ', canonicalul si steagul ' + correction.lang.toUpperCase() + ' trebuie sa indice:';
+                instruction.textContent = correction.syncRoPair
+                    ? 'Linkul RO din Flags al ' + correction.wrongSource + ' nu coincide cu referinta din pagina RO. Repara sincronizeaza steagul RO in ambele pagini ale perechii:'
+                    : 'In fisierul ' + correction.path + ', canonicalul si steagul ' + correction.lang.toUpperCase() + ' trebuie sa indice:';
                 const wrong = document.createElement('strong'); wrong.style.color = '#fca5a5'; wrong.textContent = correction.wrong;
                 const right = document.createElement('strong'); right.style.color = '#86efac'; right.textContent = correction.correct;
                 card.append(pair, instruction, wrong, document.createTextNode(' → '), right);
@@ -12208,7 +12268,10 @@ if (isset($_GET['action'])) {
             }
             for (const issue of issues) {
                 // Hide redundant explanations already covered by an explicit replacement.
-                const covered = displayed.some(c => issue.includes(c.path) && issue.includes(c.wrong));
+                const covered = displayed.some(c => {
+                    if (issue.includes(c.path) && issue.includes(c.wrong)) return true;
+                    return c.syncRoPair && String(issue).startsWith('en/' + c.pair.en + ': corespondent lips') && String(issue).includes(' ro/');
+                });
                 if (covered) continue;
                 const p = document.createElement('p'); p.textContent = issue; p.style.color = '#fcd18b'; dialog.appendChild(p);
             }
