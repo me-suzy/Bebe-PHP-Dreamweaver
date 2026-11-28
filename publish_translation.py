@@ -26,6 +26,7 @@ NEW_SITE = SITE.with_name('Principal 2022')
 INPUT = Path(r'C:\Folder1\fisiere_html')
 OUTPUT = Path(r'C:\Folder1\fisiere_gata')
 PENDING = APP / 'translation-publication.json'
+REQUEST = APP / 'translation-request.json'
 HOLD_ROOT = APP / 'translation-hold'
 
 def log(message):
@@ -61,14 +62,65 @@ def category(path):
         raise RuntimeError('Nu pot identifica categoria articolului: ' + str(path))
     return safe_name(anchor['href'])
 
+def language_link_name(path, language):
+    soup = BeautifulSoup(Path(path).read_text(encoding='utf-8-sig'), 'html.parser')
+    for anchor in soup.find_all('a', href=True):
+        image = anchor.find('img')
+        if not image:
+            continue
+        labels = [str(image.get(key, '')).strip().lower() for key in ('alt', 'title')]
+        if language.lower() in labels:
+            return safe_name(anchor['href'])
+    raise RuntimeError('Nu găsesc steagul ' + language.upper() + ' în: ' + str(path))
+
+def expected_en_categories(ro_files):
+    names = set()
+    for name in ro_files:
+        ro_category = category(SITE/'ro'/name)
+        names.add(language_link_name(SITE/'ro'/ro_category, 'en'))
+    return names
+
+def archive_prepared_run(state):
+    """Archive generated staging files before retrying a run that never reached publication."""
+    run = Path(state['run'])
+    run_status = json.loads((run/'stare.json').read_text(encoding='utf-8'))
+    en_articles = set(run_status.get('fisiere_en', {}))
+    en_categories = expected_en_categories(run_status.get('fisiere', []))
+    allowed = en_articles | en_categories | {'index.html'}
+    archive = APP/'translation-hold'/'retry-archive'/run.name
+    for folder in (INPUT, OUTPUT):
+        current = html_files(folder)
+        unexpected = set(current) - allowed
+        if unexpected:
+            raise RuntimeError('Nu pot relua traducerea: fisiere neasociate rulării în ' + str(folder) + ': ' + ', '.join(sorted(unexpected)))
+        if current:
+            target = archive/folder.name
+            target.mkdir(parents=True, exist_ok=True)
+            for name, source in current.items():
+                dest = target/name
+                if dest.exists() and digest(dest) != digest(source):
+                    raise RuntimeError('Arhiva reluării conține o variantă diferită: ' + str(dest))
+                if not dest.exists():
+                    shutil.copy2(source, dest)
+                if digest(dest) != digest(source):
+                    raise RuntimeError('Nu am putut arhiva în siguranță fișierul: ' + str(source))
+    for folder in (INPUT, OUTPUT):
+        for name in html_files(folder):
+            (folder/name).unlink()
+    PENDING.unlink(missing_ok=True)
+    log('Rularea pregătită anterior a fost arhivată fără pierderea fișierelor; pornesc traducerea din nou.')
+
 def initialize(run):
     status = json.loads((run/'stare.json').read_text(encoding='utf-8'))
     save(dict(run=str(run), phase='prepare', articles=status['fisiere'], complete=False))
-    en = set(status['fisiere_en'])
-    en.update(category(SITE/'en'/name) for name in status['fisiere_en'])
+    en_articles = set(status['fisiere_en'])
+    en_categories = expected_en_categories(status['fisiere'])
+    allowed_en = en_articles | en_categories | {'index.html'}
     actual = html_files(INPUT)
-    if set(actual) - en - {'index.html'} or not en.issubset(actual):
-        raise RuntimeError('Fișierele EN de export nu corespund rulării. Nu public nimic; verifică fisiere_html.')
+    if set(actual) - allowed_en or not en_articles.issubset(actual):
+        missing = en_articles - set(actual)
+        extra = set(actual) - allowed_en
+        raise RuntimeError('Fișierele EN de export nu corespund rulării. Lipsesc articole: ' + ', '.join(sorted(missing)) + '; fișiere neașteptate: ' + ', '.join(sorted(extra)) + '. Nu public nimic; verifică fisiere_html.')
     ro = set(status['fisiere'])
     ro.update(category(SITE/'ro'/name) for name in status['fisiere'])
     for name in ro:
@@ -144,7 +196,14 @@ def validate_outputs(state):
     if set(actual) != expected:
         raise RuntimeError('Design incomplet sau fișiere străine în fisiere_gata. Lipsesc: ' + ', '.join(sorted(expected-set(actual))) + '; în plus: ' + ', '.join(sorted(set(actual)-expected)))
     for name, path in actual.items():
-        source = BeautifulSoup(path.read_text(encoding='utf-8-sig'), 'html.parser')
+        raw = path.read_text(encoding='utf-8-sig')
+        # Unele scripturi vechi adauga .html peste un URL deja terminat in .html.
+        # Corectam extensiile repetate inaintea validarii canonicalului si publicarii.
+        repaired = re.sub(r'(?i)\.html(?:\.html)+(?=$|[^\w.-])', '.html', raw)
+        if repaired != raw:
+            path.write_text(repaired, encoding='utf-8')
+            log('Corectat automat .html.html in rezultatul designului: ' + name)
+        source = BeautifulSoup(repaired, 'html.parser')
         if not source.html or not source.body or not source.title or not source.get_text(strip=True):
             raise RuntimeError('HTML rezultat incomplet: ' + name)
         canonical = source.select_one('link[rel~=canonical][href]')
@@ -270,11 +329,28 @@ def main():
             msvcrt.locking(lock.fileno(),msvcrt.LK_NBLCK,1)
         except OSError:
             raise RuntimeError('O traducere/publicare rulează deja.') from None
+        requested = []
+        if REQUEST.exists():
+            try:
+                request = json.loads(REQUEST.read_text(encoding='utf-8'))
+                requested = request.get('files', []) if isinstance(request, dict) else []
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError('Lista confirmata pentru traducere nu poate fi citita: ' + str(exc))
+            if (not isinstance(requested, list) or not requested
+                    or any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9._-]+\.html?', name, re.I) for name in requested)):
+                raise RuntimeError('Lista confirmata pentru traducere este invalida. Apasa din nou Translate.')
+            requested = list(dict.fromkeys(requested))
         state = json.loads(PENDING.read_text(encoding='utf-8')) if PENDING.exists() else None
-        if state and not state.get('complete'):
+        if state and not state.get('complete') and requested and set(requested) == set(state.get('articles', [])) and state.get('phase') == 'prepare':
+            archive_prepared_run(state)
+            state = None
+        if state and not state.get('complete') and (not requested or set(requested) == set(state.get('articles', []))):
             log('Reiau publicarea neterminată, fără o nouă traducere.')
             publish(state)
+            REQUEST.unlink(missing_ok=True)
             return
+        if state and not state.get('complete') and requested:
+            raise RuntimeError('Exista o publicare neterminata pentru alta lista de articole. Am pastrat fisierele de lucru; verifica rularea anterioara inainte sa pornesti lista confirmata.')
         if html_files(INPUT) or html_files(OUTPUT):
             raise RuntimeError('Folderele fisiere_html/fisiere_gata conțin HTML-uri dintr-o lucrare anterioară. Mută-le înainte de o traducere nouă; nu le șterg automat.')
         ftp=connect()
@@ -283,13 +359,22 @@ def main():
         finally: ftp.close()
         before=set((PIPE/'_traducere_claude').glob('run_*'))
         env=dict(os.environ,TRADUCE_TOT_MARCAJ='',PYTHONIOENCODING='utf-8')
-        result=subprocess.run([sys.executable,'-u',str(PIPE/'TRADUCE TOT - automat.py')],cwd=PIPE,env=env,stdin=subprocess.DEVNULL)
+        # Pipe with immediate EOF avoids passing NUL stdin to nested Windows cmd/batch tasks.
+        command = [sys.executable, '-u', str(PIPE/'TRADUCE TOT - automat.py')]
+        if requested:
+            for name in requested:
+                if not (SITE/'ro'/name).is_file():
+                    raise RuntimeError('Fisierul confirmat nu mai exista in Principal/ro: ' + name)
+            command.extend(['--fisiere', *requested])
+            log('Traduc doar lista confirmata: ' + ', '.join(requested))
+        result=subprocess.run(command,cwd=PIPE,env=env,input=b'')
         if result.returncode:
             raise RuntimeError('Traducerea a eșuat. Publicarea nu a fost pornită.')
         runs=set((PIPE/'_traducere_claude').glob('run_*'))-before
         if len(runs)!=1:
             raise RuntimeError('Nu pot identifica fără ambiguitate rularea de publicat.')
         publish(initialize(runs.pop()))
+        REQUEST.unlink(missing_ok=True)
 
 if __name__=='__main__':
     code=0

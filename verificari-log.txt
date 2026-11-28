@@ -61,3 +61,73 @@
 2026-11-27 17:24:49  PROBLEMĂ   en/total-acceptance-into-the-indefinite.html: corespondent lipsă ro/acceptare-totala-in-indefinit2.html
 2026-11-27 17:24:59  PROBLEMĂ REZOLVATĂ  FLAGS RO diferite: ro/acceptare-totala-in-indefinit.html → acceptare-totala-in-indefinit.html; en/total-acceptance-into-the-indefinite.html → acceptare-totala-in-indefinit2.html
 2026-11-27 17:24:59  PROBLEMĂ REZOLVATĂ  en/total-acceptance-into-the-indefinite.html: corespondent lipsă ro/acceptare-totala-in-indefinit2.html
+2026-11-27 18:00:36  PROBLEMĂ   CANONICAL RO diferit: ro/stultitia-simulata.html -> https://neculaifantanaru.com/sursa-fluxului-de-materie-pura.html; trebuie sa indice https://neculaifantanaru.com/stultitia-simulata.html
+2026-11-27 18:00:36  PROBLEMĂ   ro/stultitia-simulata.html: nu este în nicio categorie și nu are corespondent EN valid în FLAGS
+2026-11-27 18:00:36  PROBLEMĂ   ro/stultitia-simulata.html: steagul RO indică sursa-fluxului-de-materie-pura.html, dar trebuie să indice stultitia-simulata.html
+2026-11-27 18:00:37  GĂSIT      [Dată duplicată] ro: Iulie 21, 2013 — stultitia-simulata.html, sursa-fluxului-de-materie-pura.html
+2026-11-27 19:02:38  REPARAT    [Dată duplicată] stultitia-simulata.html: Iulie 21, 2013 → Iulie 20, 2013 (din fereastra Date duplicate)
+2026-11-27 19:03:30  PROBLEMĂ   FLAGS RO diferite: ro/stultitia-simulata.html → stultitia-simulata.html; en/the-flux-s-source-of-pure-substance.html → sursa-fluxului-de-materie-pura.html
+2026-11-27 19:03:30  PROBLEMĂ   en/index.html: lipsește linkul FLAGS către RO
+2026-11-27 19:03:30  PROBLEMĂ   ro/index.html: lipsește linkul FLAGS către EN
+2026-11-27 19:03:30  PROBLEMĂ REZOLVATĂ  CANONICAL RO diferit: ro/stultitia-simulata.html -> https://neculaifantanaru.com/sursa-fluxului-de-materie-pura.html; trebuie sa indice https://neculaifantanaru.com/stultitia-simulata.html
+2026-11-27 19:03:30  PROBLEMĂ REZOLVATĂ  ro/stultitia-simulata.html: steagul RO indică sursa-fluxului-de-materie-pura.html, dar trebuie să indice stultitia-simulata.html
+2026-11-27 19:03:31  REZOLVAT   [Dată duplicată] ro: Iulie 21, 2013 — stultitia-simulata.html, sursa-fluxului-de-materie-pura.html
+2026-11-27 19:08:06  PROBLEMĂ REZOLVATĂ  en/index.html: lipsește linkul FLAGS către RO
+2026-11-27 19:08:06  PROBLEMĂ REZOLVATĂ  ro/index.html: lipsește linkul FLAGS către EN
+2026-11-27 19:22:08  GĂSIT      [Dată duplicată] ro: Iulie 21, 2013 — stultitia-simulata.html, sursa-fluxului-de-materie-pura.html
+2026-11-27 19:22:18  REPARAT    [Dată duplicată] stultitia-simulata.html: Iulie 21, 2013 → Iulie 20, 2013 (din fereastra Date duplicate)
+2026-11-27 19:23:12  REZOLVAT   [Dată duplicată] ro: Iulie 21, 2013 — stultitia-simulata.html, sursa-fluxului-de-materie-pura.html
+2026-11-27 19:29:46  GĂSIT      [Dată duplicată] ro: Iulie 21, 2013 — stultitia-simulata.html, sursa-fluxului-de-materie-pura.html
+2026-11-27 19:29:54  REPARAT    [Dată duplicată] stultitia-simulata.html: Iulie 21, 2013 → Iulie 20, 2013 (din fereastra Date duplicate)
+2026-11-27 19:32:04  PROBLEMĂ REZOLVATĂ  ro/stultitia-simulata.html: nu este în nicio categorie și nu are corespondent EN valid în FLAGS
+2026-11-27 19:41:25  REZOLVAT   [Dată duplicată] ro: Iulie 21, 2013 — stultitia-simulata.html, sursa-fluxului-de-materie-pura.html
+2026-11-27 20:05:22  PROBLEMĂ REZOLVATĂ  FLAGS RO diferite: ro/stultitia-simulata.html → stultitia-simulata.html; en/the-flux-s-source-of-pure-substance.html → sursa-fluxului-de-materie-pura.html
+2026-11-27 20:10:51  PROBLEMĂ   FLAGS EN diferite: en/the-source-of-the-flow-of-pure-matter.html → the-source-of-the-flow-of-pure-matter.html; ro/sursa-fluxului-de-materie-pura.html → the-flux-s-source-of-pure-substance.html
+2026-11-27 20:10:51  PROBLEMĂ   FLAGS RO diferite: ro/stultitia-simulata.html → stultitia-simulata.html; en/the-source-of-the-flow-of-pure-matter.html → sursa-fluxului-de-materie-pura.html
+2026-11-27 20:16:19  PROBLEMĂ REZOLVATĂ  FLAGS EN diferite: en/the-source-of-the-flow-of-pure-matter.html → the-source-of-the-flow-of-pure-matter.html; ro/sursa-fluxului-de-materie-pura.html → the-flux-s-source-of-pure-substance.html
+2026-11-27 20:16:19  PROBLEMĂ REZOLVATĂ  FLAGS RO diferite: ro/stultitia-simulata.html → stultitia-simulata.html; en/the-source-of-the-flow-of-pure-matter.html → sursa-fluxului-de-materie-pura.html
+2026-11-27 20:21:02  PROBLEMĂ   FLAGS EN diferite: en/the-source-of-the-flow-of-pure-matter.html → the-source-of-the-flow-of-pure-matter.html; ro/sursa-fluxului-de-materie-pura.html → the-flux-s-source-of-pure-substance.html
+2026-11-27 20:21:02  PROBLEMĂ   FLAGS RO diferite: ro/stultitia-simulata.html → stultitia-simulata.html; en/the-source-of-the-flow-of-pure-matter.html → sursa-fluxului-de-materie-pura.html
+2026-11-27 21:10:59  PROBLEMĂ REZOLVATĂ  FLAGS RO diferite: ro/stultitia-simulata.html → stultitia-simulata.html; en/the-source-of-the-flow-of-pure-matter.html → sursa-fluxului-de-materie-pura.html
+2026-11-27 21:11:00  GĂSIT      [Dată duplicată] en: July 20, 2013 — stultitia-simulata.html, the-source-of-the-flow-of-pure-matter.html
+2026-11-27 21:11:27  REPARAT    [Dată duplicată] stultitia-simulata.html: July 20, 2013 → July 19, 2013 (din fereastra Date duplicate)
+2026-11-27 21:11:42  GĂSIT      [Dată greșită] en/stultitia-simulata.html ↔ ro/stultitia-simulata.html; dată: On July 19, 2013 → On July 20, 2013
+2026-11-27 21:11:43  REZOLVAT   [Dată duplicată] en: July 20, 2013 — stultitia-simulata.html, the-source-of-the-flow-of-pure-matter.html
+2026-11-27 21:12:10  REPARAT    (OK, aplică)  [Dată greșită] en/stultitia-simulata.html ↔ ro/stultitia-simulata.html; dată: On July 19, 2013 → On July 20, 2013
+2026-11-27 21:12:11  GĂSIT      [Dată duplicată] en: July 20, 2013 — stultitia-simulata.html, the-source-of-the-flow-of-pure-matter.html
+2026-11-27 21:13:42  PROBLEMĂ REZOLVATĂ  FLAGS EN diferite: en/the-source-of-the-flow-of-pure-matter.html → the-source-of-the-flow-of-pure-matter.html; ro/sursa-fluxului-de-materie-pura.html → the-flux-s-source-of-pure-substance.html
+2026-11-27 21:13:43  REZOLVAT   [Dată duplicată] en: July 20, 2013 — stultitia-simulata.html, the-source-of-the-flow-of-pure-matter.html
+2026-11-27 21:15:03  PROBLEMĂ   FLAGS RO diferite: ro/stultitia-simulata.html → stultitia-simulata.html; en/stultitia-simulata.html → stultitia-simulata1.html
+2026-11-27 21:15:03  PROBLEMĂ   en/stultitia-simulata.html: corespondent lipsă ro/stultitia-simulata1.html
+2026-11-27 21:15:51  PROBLEMĂ   FLAGS EN diferite: en/stultitia-simulata.html → stultitia-simulata1.html; ro/stultitia-simulata.html → stultitia-simulata.html
+2026-11-27 21:15:51  PROBLEMĂ   FLAGS EN diferite: ro/stultitia-simulata.html → stultitia-simulata.html; en/stultitia-simulata.html → stultitia-simulata1.html
+2026-11-27 21:15:51  PROBLEMĂ   en/stultitia-simulata.html: steagul EN indică stultitia-simulata1.html, dar trebuie să indice stultitia-simulata.html
+2026-11-27 21:15:51  PROBLEMĂ REZOLVATĂ  FLAGS RO diferite: ro/stultitia-simulata.html → stultitia-simulata.html; en/stultitia-simulata.html → stultitia-simulata1.html
+2026-11-27 21:15:51  PROBLEMĂ REZOLVATĂ  en/stultitia-simulata.html: corespondent lipsă ro/stultitia-simulata1.html
+2026-11-27 21:16:16  PROBLEMĂ REZOLVATĂ  FLAGS EN diferite: en/stultitia-simulata.html → stultitia-simulata1.html; ro/stultitia-simulata.html → stultitia-simulata.html
+2026-11-27 21:16:16  PROBLEMĂ REZOLVATĂ  FLAGS EN diferite: ro/stultitia-simulata.html → stultitia-simulata.html; en/stultitia-simulata.html → stultitia-simulata1.html
+2026-11-27 21:16:16  PROBLEMĂ REZOLVATĂ  en/stultitia-simulata.html: steagul EN indică stultitia-simulata1.html, dar trebuie să indice stultitia-simulata.html
+2026-11-27 21:17:01  PROBLEMĂ   FLAGS RO diferite: ro/stultitia-simulata.html → stultitia-simulata.html; en/stultitia-simulata.html → stultitia-simulata1.html
+2026-11-27 21:17:01  PROBLEMĂ   en/stultitia-simulata.html: corespondent lipsă ro/stultitia-simulata1.html
+2026-11-27 21:52:22  PROBLEMĂ REZOLVATĂ  FLAGS RO diferite: ro/stultitia-simulata.html → stultitia-simulata.html; en/stultitia-simulata.html → stultitia-simulata1.html
+2026-11-27 21:52:22  PROBLEMĂ REZOLVATĂ  en/stultitia-simulata.html: corespondent lipsă ro/stultitia-simulata1.html
+2026-11-27 21:52:37  PROBLEMĂ   FLAGS EN diferite: en/stultitia-simulata.html → stultitia-simulata444.html; ro/stultitia-simulata.html → stultitia-simulata.html
+2026-11-27 21:52:37  PROBLEMĂ   FLAGS EN diferite: ro/stultitia-simulata.html → stultitia-simulata.html; en/stultitia-simulata.html → stultitia-simulata444.html
+2026-11-27 21:52:37  PROBLEMĂ   en/stultitia-simulata.html: steagul EN indică stultitia-simulata444.html, dar trebuie să indice stultitia-simulata.html
+2026-11-27 21:52:44  PROBLEMĂ REZOLVATĂ  FLAGS EN diferite: en/stultitia-simulata.html → stultitia-simulata444.html; ro/stultitia-simulata.html → stultitia-simulata.html
+2026-11-27 21:52:44  PROBLEMĂ REZOLVATĂ  FLAGS EN diferite: ro/stultitia-simulata.html → stultitia-simulata.html; en/stultitia-simulata.html → stultitia-simulata444.html
+2026-11-27 21:52:44  PROBLEMĂ REZOLVATĂ  en/stultitia-simulata.html: steagul EN indică stultitia-simulata444.html, dar trebuie să indice stultitia-simulata.html
+2026-11-27 21:52:56  PROBLEMĂ   CANONICAL EN diferit: en/stultitia-simulata.html -> https://neculaifantanaru.com/en/stultitia-simulata444.html; trebuie sa indice https://neculaifantanaru.com/en/stultitia-simulata.html
+2026-11-27 21:53:03  PROBLEMĂ REZOLVATĂ  CANONICAL EN diferit: en/stultitia-simulata.html -> https://neculaifantanaru.com/en/stultitia-simulata444.html; trebuie sa indice https://neculaifantanaru.com/en/stultitia-simulata.html
+2026-11-27 21:53:27  PROBLEMĂ   FLAGS RO diferite: en/leadership-skills-and-abilities.html → aptitudini-si-abilitati-de-leadership.html; ro/aptitudini-si-abilitati-de-leadership.html → aptitudini-si-abilitati-de-leadership11.html
+2026-11-27 21:53:27  PROBLEMĂ   FLAGS RO diferite: ro/aptitudini-si-abilitati-de-leadership.html → aptitudini-si-abilitati-de-leadership11.html; en/leadership-skills-and-abilities.html → aptitudini-si-abilitati-de-leadership.html
+2026-11-27 21:53:27  PROBLEMĂ   ro/aptitudini-si-abilitati-de-leadership.html: steagul RO indică aptitudini-si-abilitati-de-leadership11.html, dar trebuie să indice aptitudini-si-abilitati-de-leadership.html
+2026-11-27 21:53:33  PROBLEMĂ REZOLVATĂ  FLAGS RO diferite: en/leadership-skills-and-abilities.html → aptitudini-si-abilitati-de-leadership.html; ro/aptitudini-si-abilitati-de-leadership.html → aptitudini-si-abilitati-de-leadership11.html
+2026-11-27 21:53:33  PROBLEMĂ REZOLVATĂ  FLAGS RO diferite: ro/aptitudini-si-abilitati-de-leadership.html → aptitudini-si-abilitati-de-leadership11.html; en/leadership-skills-and-abilities.html → aptitudini-si-abilitati-de-leadership.html
+2026-11-27 21:53:33  PROBLEMĂ REZOLVATĂ  ro/aptitudini-si-abilitati-de-leadership.html: steagul RO indică aptitudini-si-abilitati-de-leadership11.html, dar trebuie să indice aptitudini-si-abilitati-de-leadership.html
+2026-11-27 21:53:46  PROBLEMĂ   FLAGS EN diferite: en/leadership-skills-and-abilities.html → leadership-skills-and-abilities.html; ro/aptitudini-si-abilitati-de-leadership.html → leadership-skills-and-abilitiesdfgfdgdf.html
+2026-11-27 21:53:46  PROBLEMĂ   ro/aptitudini-si-abilitati-de-leadership.html: FLAGS EN nu duce la o categorie existentă în en/ (leadership-skills-and-abilitiesdfgfdgdf.html)
+2026-11-27 21:53:46  PROBLEMĂ   ro/aptitudini-si-abilitati-de-leadership.html: corespondent lipsă en/leadership-skills-and-abilitiesdfgfdgdf.html
+2026-11-27 21:53:52  PROBLEMĂ REZOLVATĂ  FLAGS EN diferite: en/leadership-skills-and-abilities.html → leadership-skills-and-abilities.html; ro/aptitudini-si-abilitati-de-leadership.html → leadership-skills-and-abilitiesdfgfdgdf.html
+2026-11-27 21:53:52  PROBLEMĂ REZOLVATĂ  ro/aptitudini-si-abilitati-de-leadership.html: FLAGS EN nu duce la o categorie existentă în en/ (leadership-skills-and-abilitiesdfgfdgdf.html)
+2026-11-27 21:53:52  PROBLEMĂ REZOLVATĂ  ro/aptitudini-si-abilitati-de-leadership.html: corespondent lipsă en/leadership-skills-and-abilitiesdfgfdgdf.html

@@ -1,41 +1,41 @@
 {
-  "run": "E:\\Carte\\BB\\17 - Site Leadership\\alte\\Ionel Balauta\\Aryeht\\Task 1 - Traduce tot site-ul\\Doar Google Web\\Andreea\\Meditatii\\2023\\Iulia Python\\_traducere_claude\\run_2026-11-23_17-52-18",
+  "run": "E:\\Carte\\BB\\17 - Site Leadership\\alte\\Ionel Balauta\\Aryeht\\Task 1 - Traduce tot site-ul\\Doar Google Web\\Andreea\\Meditatii\\2023\\Iulia Python\\_traducere_claude\\run_2026-11-27_21-09-51",
   "order": "ro-first",
   "phase": "en",
   "design_done": true,
   "en_files": [
-    "hr-human-resources.html",
-    "the-seal-of-the-shifting-sand.html"
+    "leadership-360.html",
+    "stultitia-simulata.html"
   ],
   "files": [
-    "hr-human-resources.html",
-    "the-seal-of-the-shifting-sand.html"
+    "leadership-360.html",
+    "stultitia-simulata.html"
   ],
   "ro_files": [
-    "hr-resurse-umane.html",
-    "sigiliul-nisipului-miscator.html"
+    "leadership-360.html",
+    "stultitia-simulata.html"
   ],
   "articles": [
-    "sigiliul-nisipului-miscator.html"
+    "stultitia-simulata.html"
   ],
   "published": [
-    "hr-human-resources.html",
-    "the-seal-of-the-shifting-sand.html"
+    "leadership-360.html",
+    "stultitia-simulata.html"
   ],
   "complete": true,
-  "hold": "D:\\Teste cursor\\HTML Editor\\translation-hold\\run_2026-11-23_17-52-18",
+  "hold": "D:\\Teste cursor\\HTML Editor\\translation-hold\\run_2026-11-27_21-09-51",
   "en_hashes": {
-    "hr-human-resources.html": "c045b88770b66cfc8908c9543faa2124ff4f7a5a071f7343da19e5c503d2106b",
-    "the-seal-of-the-shifting-sand.html": "15143e7a77407f7c69d2a1bf8ee850ee0f3cdf19b8b4f0c93f28ac155f99f9b4"
+    "stultitia-simulata.html": "fb30952632b7fdd50050da644c824596a2e391d1bbd82c2c230f7ef83428a80f",
+    "leadership-360.html": "ff31d67a5693f80b38c1b7b589f0d9f802472522149b0bc964b87a9acf0d3a17"
   },
   "design_started": true,
   "cleanup": true,
   "input_hashes": {
-    "hr-human-resources.html": "c045b88770b66cfc8908c9543faa2124ff4f7a5a071f7343da19e5c503d2106b",
-    "the-seal-of-the-shifting-sand.html": "15143e7a77407f7c69d2a1bf8ee850ee0f3cdf19b8b4f0c93f28ac155f99f9b4"
+    "leadership-360.html": "ff31d67a5693f80b38c1b7b589f0d9f802472522149b0bc964b87a9acf0d3a17",
+    "stultitia-simulata.html": "fb30952632b7fdd50050da644c824596a2e391d1bbd82c2c230f7ef83428a80f"
   },
   "output_hashes": {
-    "hr-human-resources.html": "ae3d107d557e78236eb9193f37755051f99c1d984089c8de5a8c82cf17f67a33",
-    "the-seal-of-the-shifting-sand.html": "1ecaad5e21f6d1e23772ae4bc06d77711f08a1c0ce77021a17637519adea41f3"
+    "leadership-360.html": "15b890c907f2c7ef348409bbdf5c0f7e4f6f6ac4219af78650ac54da7a42d9d1",
+    "stultitia-simulata.html": "e0c367f5e70f8f92a6c6a737d0ecfb2eb7bb4b7276b86ea31c51488edd02befc"
   }
 }

@@ -361,7 +361,7 @@ class Store:
             os.replace(temporary, path)
 
 
-def audit_categories(dry_run, excluded, apply_ids=()):
+def audit_categories(dry_run, excluded, apply_ids=(), category_only=False):
     """Fiecare articol RO/EN trebuie sa fie intr-o singura categorie, cea corecta.
     RO e sursa de adevar: categoria EN este corespondentul (din FLAGS) al categoriei RO a articolului.
     Recuperari sigure se fac automat; restul devin propuneri care se aplica doar dupa OK."""
@@ -459,10 +459,13 @@ def audit_categories(dry_run, excluded, apply_ids=()):
         ro_listed = bool(scanned['ro'][2].get(twin.lower())) or twin in recovered_ro
         current = article_category(name, text)
         # Data: RO e sursa de adevar. Daca difera, la OK se ia data din articolul RO, scrisa in engleza.
-        en_cell, ro_cell = date_cell(text), date_cell(ro_text)
-        en_date = block_date(en_cell[2]) if en_cell else None
-        ro_date = block_date(ro_cell[2]) if ro_cell else None
-        new_date_text = en_date_text(ro_cell[2]) if (en_date and ro_date and en_date != ro_date) else None
+        en_cell = ro_date = new_date_text = None
+        if not category_only:
+            en_cell, ro_cell = date_cell(text), date_cell(ro_text)
+            en_date = block_date(en_cell[2]) if en_cell else None
+            ro_date = block_date(ro_cell[2]) if ro_cell else None
+            if en_date and ro_date and en_date != ro_date:
+                new_date_text = en_date_text(ro_cell[2])
         if where == [en_category] and current == en_category and not new_date_text:
             continue
         if not where and not ro_listed:
@@ -594,7 +597,7 @@ def write_log(result, apply_ids):
     SEEN.write_text(json.dumps({'proposals': now_props, 'issues': sorted(now_issues)}, ensure_ascii=False, indent=1), encoding='utf-8')
 
 
-def sync(dry_run=False, excluded=(), apply_ids=()):
+def sync(dry_run=False, excluded=(), apply_ids=(), category_only=False):
     tools = runpy.run_path(str(PIPELINE / 'Pasul 5 - Duce fiecare articol in fisierul categorii din care face parte si apoi in index FINAL.py'))
     tools['merge_listing'].__globals__['DEBUG'] = False
     issues, changes = [], []
@@ -658,7 +661,8 @@ def sync(dry_run=False, excluded=(), apply_ids=()):
                     raise ValueError('Dată RO invalidă: ' + ro_article)
                 expected = dt.datetime(int(date[3]), MONTHS.index(date[1].lower()) + 1, int(date[2]))
                 if expected != article['date_obj']:
-                    issues.append(f'{en_article}: data EN {article["date"]} diferă de RO {expected:%Y-%m-%d}; verificare manuală')
+                    if not category_only:
+                        issues.append(f'{en_article}: data EN {article["date"]} diferă de RO {expected:%Y-%m-%d}; verificare manuală')
                     continue
                 additions.append(article)
                 existing.add(en_article)
@@ -676,7 +680,7 @@ def sync(dry_run=False, excluded=(), apply_ids=()):
             issues.append(f'{en_name}: {error}')
     proposals = []
     try:
-        recovered, recover_issues, proposals = audit_categories(dry_run, excluded, set(apply_ids))
+        recovered, recover_issues, proposals = audit_categories(dry_run, excluded, set(apply_ids), category_only=category_only)
         changes.extend(recovered)
         issues.extend(recover_issues)
     except Exception as error:
@@ -687,6 +691,7 @@ def sync(dry_run=False, excluded=(), apply_ids=()):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--category-only', action='store_true')
     parser.add_argument('--exclude', default='[]')
     parser.add_argument('--apply', default='[]')
     args = parser.parse_args()
@@ -714,7 +719,7 @@ if __name__ == '__main__':
         result = {'ok': True, 'busy': True}
     else:
         try:
-            result = sync(args.dry_run, json.loads(args.exclude), json.loads(args.apply))
+            result = sync(args.dry_run, json.loads(args.exclude), json.loads(args.apply), category_only=args.category_only)
             if not args.dry_run:
                 try:
                     write_log(result, set(json.loads(args.apply)))
